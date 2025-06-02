@@ -343,8 +343,9 @@ MaterialHandle MaterialManager::add_material(const MaterialData& material) {
 			.shader_vertex(_shader_blob[RenderPassType::Lighting]["screen_quad.vert"]);
 		{
 			otcv::VertexBufferBuilder vbb;
-			vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
-				.add_binding().add_attribute(0, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2));
+			vbb.add_binding()
+				.add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
+				.add_attribute(0, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2));
 			pipeline_builder.vertex_state(vbb);
 		}
 		pipeline_builder

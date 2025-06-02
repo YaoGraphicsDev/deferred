@@ -178,14 +178,6 @@ public:
             .usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
             .build();
         _lit_image->initialize_state(otcv::ResourceState::ColorAttachment);
-
-        _mock_depth_image = otcv::ImageBuilder()
-            .size(window_width, window_height, 1)
-            .format(VK_FORMAT_D24_UNORM_S8_UINT)
-            .usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
-            .aspect(VK_IMAGE_ASPECT_DEPTH_BIT)
-            .build();
-        _depth_image->initialize_state(otcv::ResourceState::DepthStencilAttachment);
     }
     void init_frame_contexts() {
         _command_pool = otcv::CommandPool::create(false, true);
@@ -209,7 +201,9 @@ public:
             ctx.image_available_semaphore = otcv::Semaphore::create();
 
             // command buffers
-            ctx.graphics_command_buffer = _command_pool->allocate();
+            for (uint16_t pass = 0; pass < (uint16_t)RenderPassType::All; ++pass) {
+                ctx.graphics_command_buffers[(RenderPassType)pass] = _command_pool->allocate();
+            }
             ctx.blit_command_buffer = _command_pool->allocate();
         }
         _screen_quad = otcv::screen_quad_ndc();
@@ -256,10 +250,8 @@ public:
     }
 
 
-    void graphics_commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
+    void g_pass_commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
         FrameContext& f_ctx = _frame_ctxs[frame_id];
-
-
 
         auto bind_dynamic_ubo = [&](
             otcv::GraphicsPipeline* pipeline,
@@ -322,6 +314,51 @@ public:
             }
         };
 
+        otcv::RenderingBegin pass_begin;
+        pass_begin
+            .area(window_width, window_height)
+            .color_attachment()
+            .image_view(_albedo_image->vk_view)
+            .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
+            .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
+            .end()
+            .color_attachment()
+            .image_view(_normals_image->vk_view)
+            .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
+            .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
+            .end()
+            .color_attachment()
+            .image_view(_metallic_roughness_image->vk_view)
+            .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
+            .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
+            .end()
+            .depth_stencil_attachment()
+            .image_view(_depth_image->vk_view)
+            .image_layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
+            .clear_value(1.0f, 0)
+            .end();
+        cmd_buf->cmd_begin_rendering(pass_begin);
+        // TODO: cover this with otcv::CommandBuffer functions
+        VkViewport viewport{ 0.0f, 0.0f, window_width, window_height, 0.0f, 1.0f };
+        vkCmdSetViewport(cmd_buf->vk_command_buffer, 0, 1, &viewport);
+        VkRect2D scissor{ {0, 0}, {window_width, window_height} };
+        vkCmdSetScissor(cmd_buf->vk_command_buffer, 0, 1, &scissor);
+        draw_scene(RenderPassType::Geometry);
+        cmd_buf->cmd_end_rendering();
+
+        cmd_buf->cmd_image_memory_barrier(_albedo_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
+        cmd_buf->cmd_image_memory_barrier(_normals_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
+        cmd_buf->cmd_image_memory_barrier(_metallic_roughness_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
+        cmd_buf->cmd_image_memory_barrier(_depth_image, otcv::ResourceState::DepthStencilAttachment, otcv::ResourceState::FragSample);
+    }
+
+    void lighting_pass_commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
+        FrameContext& f_ctx = _frame_ctxs[frame_id];
+
         auto lighting = [&]() {
             assert(f_ctx.frame_desc_sets.find(RenderPassType::Lighting) != f_ctx.frame_desc_sets.end());
             // TODO: one lighting model might be shared across different materials.
@@ -348,83 +385,29 @@ public:
             vkCmdDraw(cmd_buf->vk_command_buffer, 3, 1, 0, 0);
         };
 
-        // Geometry pass
-        {
-            otcv::RenderingBegin pass_begin;
-            pass_begin
-                .area(window_width, window_height)
-                .color_attachment()
-                .image_view(_albedo_image->vk_view)
-                .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
-                .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
-                .end()
-                .color_attachment()
-                .image_view(_normals_image->vk_view)
-                .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
-                .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
-                .end()
-                .color_attachment()
-                .image_view(_metallic_roughness_image->vk_view)
-                .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
-                .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
-                .end()
-                .depth_stencil_attachment()
-                .image_view(_depth_image->vk_view)
-                .image_layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
-                .clear_value(1.0f, 0)
-                .end();
-            cmd_buf->cmd_begin_rendering(pass_begin);
-            // TODO: cover this with otcv::CommandBuffer functions
-            VkViewport viewport{ 0.0f, 0.0f, window_width, window_height, 0.0f, 1.0f };
-            vkCmdSetViewport(cmd_buf->vk_command_buffer, 0, 1, &viewport);
-            VkRect2D scissor{ {0, 0}, {window_width, window_height} };
-            vkCmdSetScissor(cmd_buf->vk_command_buffer, 0, 1, &scissor);
-            draw_scene(RenderPassType::Geometry);
-            cmd_buf->cmd_end_rendering();
+        // TODO: cover this with otcv::CommandBuffer functions
+        VkViewport viewport{ 0.0f, 0.0f, window_width, window_height, 0.0f, 1.0f };
+        vkCmdSetViewport(cmd_buf->vk_command_buffer, 0, 1, &viewport);
+        VkRect2D scissor{ {0, 0}, {window_width, window_height} };
+        vkCmdSetScissor(cmd_buf->vk_command_buffer, 0, 1, &scissor);
 
-            cmd_buf->cmd_image_memory_barrier(_albedo_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
-            cmd_buf->cmd_image_memory_barrier(_normals_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
-            cmd_buf->cmd_image_memory_barrier(_metallic_roughness_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
-            cmd_buf->cmd_image_memory_barrier(_depth_image, otcv::ResourceState::DepthStencilAttachment, otcv::ResourceState::FragSample);
-        }
+        otcv::RenderingBegin pass_begin;
+        pass_begin
+            .area(window_width, window_height)
+            .color_attachment()
+            .image_view(_lit_image->vk_view)
+            .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
+            .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
+            .end();
+        cmd_buf->cmd_begin_rendering(pass_begin);
+        lighting();
+        cmd_buf->cmd_end_rendering();
 
-        // lighting pass 
-        {
-            // TODO: cover this with otcv::CommandBuffer functions
-            VkViewport viewport{ 0.0f, 0.0f, window_width, window_height, 0.0f, 1.0f };
-            vkCmdSetViewport(cmd_buf->vk_command_buffer, 0, 1, &viewport);
-            VkRect2D scissor{ {0, 0}, {window_width, window_height} };
-            vkCmdSetScissor(cmd_buf->vk_command_buffer, 0, 1, &scissor);
-
-            otcv::RenderingBegin pass_begin;
-            pass_begin
-                .area(window_width, window_height)
-                .color_attachment()
-                .image_view(_lit_image->vk_view)
-                .image_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                .load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
-                .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
-                .end()
-                .depth_stencil_attachment()
-                .image_view(_mock_depth_image->vk_view)
-                .image_layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_store(VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE)
-                .clear_value(1.0f, 0)
-                .end();
-              cmd_buf->cmd_begin_rendering(pass_begin);
-            lighting();
-            cmd_buf->cmd_end_rendering();
-
-            cmd_buf->cmd_image_memory_barrier(_albedo_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
-            cmd_buf->cmd_image_memory_barrier(_normals_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
-            cmd_buf->cmd_image_memory_barrier(_metallic_roughness_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
-            cmd_buf->cmd_image_memory_barrier(_depth_image, otcv::ResourceState::FragSample, otcv::ResourceState::DepthStencilAttachment);
-        }
-
+        cmd_buf->cmd_image_memory_barrier(_albedo_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
+        cmd_buf->cmd_image_memory_barrier(_normals_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
+        cmd_buf->cmd_image_memory_barrier(_metallic_roughness_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
+        cmd_buf->cmd_image_memory_barrier(_depth_image, otcv::ResourceState::FragSample, otcv::ResourceState::DepthStencilAttachment);
 
         // insert a memory barrier at the end, so that blit commands will not start prematurely
         cmd_buf->cmd_image_memory_barrier(_lit_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::TransferSrc);
@@ -463,13 +446,16 @@ public:
         vkAcquireNextImageKHR(_device, _swapchain->vk_swapchain, UINT64_MAX, f_ctx.image_available_semaphore->vk_semaphore, VK_NULL_HANDLE, &image_index);
 
         update_frame_ubos(_current_frame);
-        f_ctx.graphics_command_buffer->reset();
-        f_ctx.graphics_command_buffer->record(std::bind(&Application::graphics_commands, this, std::placeholders::_1, _current_frame));
+        f_ctx.graphics_command_buffers[RenderPassType::Geometry]->reset();
+        f_ctx.graphics_command_buffers[RenderPassType::Geometry]->record(std::bind(&Application::g_pass_commands, this, std::placeholders::_1, _current_frame));
+        f_ctx.graphics_command_buffers[RenderPassType::Lighting]->reset();
+        f_ctx.graphics_command_buffers[RenderPassType::Lighting]->record(std::bind(&Application::lighting_pass_commands, this, std::placeholders::_1, _current_frame));
         {
             otcv::QueueSubmit graphics_submit;
             graphics_submit
                 .batch()
-                    .add_command_buffer(f_ctx.graphics_command_buffer)
+                    .add_command_buffer(f_ctx.graphics_command_buffers[RenderPassType::Geometry])
+                    .add_command_buffer(f_ctx.graphics_command_buffers[RenderPassType::Lighting])
                 .end()
                 .signal(f_ctx.graphics_fence);
             _vulkan_context.queue->submit(graphics_submit);
@@ -570,8 +556,6 @@ public:
 
     // lit image
     otcv::Image* _lit_image;
-    // mock depth image
-    otcv::Image* _mock_depth_image;
 
     // UBOs
     // per object
@@ -593,7 +577,7 @@ public:
         otcv::Semaphore* image_available_semaphore;
 
         // command buffers
-        otcv::CommandBuffer* graphics_command_buffer;
+        std::map<RenderPassType, otcv::CommandBuffer*> graphics_command_buffers;
         otcv::CommandBuffer* blit_command_buffer;
     };
     std::vector<FrameContext> _frame_ctxs;
