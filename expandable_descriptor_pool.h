@@ -68,9 +68,9 @@ struct SingleTypeExpandableDescriptorPool {
 	std::vector<std::pair<int, int>> _expansion_track;
 };
 
-struct TrivialExpandableDescriptorPool {
-	TrivialExpandableDescriptorPool() {};
-	~TrivialExpandableDescriptorPool() {
+struct NaiveExpandableDescriptorPool {
+	NaiveExpandableDescriptorPool() {};
+	~NaiveExpandableDescriptorPool() {
 		for (auto& p : _pools) {
 			delete p;
 		}

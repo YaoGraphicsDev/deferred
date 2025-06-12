@@ -1,13 +1,15 @@
 #pragma once
 
 enum class RenderPassType {
-	Geometry = 0,
+	Shadow = 0,
+	Geometry,
 	Lighting,
+	PostProcess,
 	All
 };
 
 enum DescriptorSetRate {
-	PerFrameUBO = 0,
+	PerFrame = 0,
 	PerObjectUBO = 1,
 	PerMaterialUBO = 2,
 	PerMaterialTexture = 3,

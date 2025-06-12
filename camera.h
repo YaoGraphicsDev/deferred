@@ -3,11 +3,6 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 
-std::ostream& operator<<(std::ostream& os, const glm::vec3& v) {
-	os << v.x << ", " << v.y << ", " << v.z;
-	return os;
-}
-
 struct PerspectiveCamera {
 	PerspectiveCamera() {};
 	PerspectiveCamera(
@@ -52,10 +47,15 @@ struct PerspectiveCamera {
 	glm::mat4 view;
 	glm::mat4 proj;
 
-	friend std::ostream& operator<<(std::ostream& os, const PerspectiveCamera& cam) {
-		os << "eye = " << cam.eye << ", center = " << cam.center << ", up = " << cam.up;
-		return os;
-	}
+	//friend std::ostream& operator<<(std::ostream& os, const glm::vec3& v) {
+	//	os << v.x << ", " << v.y << ", " << v.z;
+	//	return os;
+	//}
+
+	//friend std::ostream& operator<<(std::ostream& os, const PerspectiveCamera& cam) {
+	//	os << "eye = " << cam.eye << ", center = " << cam.center << ", up = " << cam.up;
+	//	return os;
+	//}
 };
 
 

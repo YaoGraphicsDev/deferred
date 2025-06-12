@@ -6,6 +6,8 @@ uint32_t get_base_alignment(Std140AlignmentType::InlineType type, bool in_array)
     case Std140AlignmentType::InlineType::Float:
     case Std140AlignmentType::InlineType::Uint:
         return in_array ? 16 : 4;
+    case Std140AlignmentType::InlineType::Vec2:
+        return in_array ? 16 : 8;
     case Std140AlignmentType::InlineType::Vec3:
     case Std140AlignmentType::InlineType::Vec4:
     case Std140AlignmentType::InlineType::Mat4:
@@ -21,6 +23,8 @@ uint32_t get_size(Std140AlignmentType::InlineType type, bool in_array) {
     case Std140AlignmentType::InlineType::Float:
     case Std140AlignmentType::InlineType::Uint:
         return in_array ? 16 : 4;
+    case Std140AlignmentType::InlineType::Vec2:
+        return in_array ? 16 : 8;
     case Std140AlignmentType::InlineType::Vec3:
         return in_array ? 16 : 12;
     case Std140AlignmentType::InlineType::Vec4:
@@ -111,7 +115,7 @@ StaticUBO::~StaticUBO() {
     _buf = nullptr;
 }
 
-void StaticUBO::set(StaticUBOAccess& access, void* value) {
+void StaticUBO::set(StaticUBOAccess& access, const void* value) {
     Std140AlignmentType::Range range = find_range_recursive(_layout, access, 0);
 
     assert(_buf->mapped);

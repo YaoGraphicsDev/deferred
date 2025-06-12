@@ -13,25 +13,31 @@
 #include "camera.h"
 #include "static_ubo.h"
 
+#include "shadow_manager.h"
+#include "postprocess_manager.h"
+
+#include "noise.h"
+
 #include <iostream>
 #include <array>
+#include <random>
 
 const int window_width = 1920;
 const int window_height = 960;
+const int cascaded_shadowmap_size = 2048;
+const int cascaded_shadowmap_layers = 3;
+const int jitter_tile_size = 8;
+const int jitter_strata_per_dim = 8;
+const float jitter_radius = 0.05f;
+const float cascade_blend_depth = 1.0f;
 
-/*    glm::vec3 eye,
-    glm::vec3 center,
-    glm::vec3 up,
-    float near,
-    float far,
-    float fov,
-    float aspect*/
+
 PerspectiveCamera cam(
     glm::vec3(20.0f, 20.0f, 20.0f),
     glm::vec3(0.0f, 0.0f, 0.0f),
     glm::vec3(0.0f, 1.0f, 0.0f),
     0.1f,
-    100.0f,
+    50.0f,
     glm::radians(60.0f),
     (float)window_width / (float)window_height);
     
@@ -47,7 +53,10 @@ public:
         }
         init_render_targets();
         init_frame_contexts();
+        init_texture();
         connect_render_targets();
+        init_shadow();
+        init_postprocess();
         main_loop();
         cleanup_scene();
         cleanup_imgui();
@@ -102,14 +111,29 @@ public:
         }
 
         if (pass == RenderPassType::Lighting) {
-            Std140AlignmentType Light;
-            Light.add(Std140AlignmentType::InlineType::Float, "intensity");
-            Light.add(Std140AlignmentType::InlineType::Vec3, "color");
-            Light.add(Std140AlignmentType::InlineType::Vec3, "direction");
+            Std140AlignmentType DirectionalLight;
+            DirectionalLight.add(Std140AlignmentType::InlineType::Float, "intensity");
+            DirectionalLight.add(Std140AlignmentType::InlineType::Vec3, "color");
+            DirectionalLight.add(Std140AlignmentType::InlineType::Vec3, "direction");
+            Std140AlignmentType Cascade;
+            Cascade.add(Std140AlignmentType::InlineType::Float, "zBegin");
+            Cascade.add(Std140AlignmentType::InlineType::Float, "zEnd");
+            Cascade.add(Std140AlignmentType::InlineType::Mat4, "lightSpaceView");
+            Cascade.add(Std140AlignmentType::InlineType::Mat4, "lightSpaceProject");
+            Std140AlignmentType Shadow;
+            Shadow.add(Std140AlignmentType::InlineType::Vec2, "nJitterTiles");
+            Shadow.add(Std140AlignmentType::InlineType::Uint, "nJitterStrataPerDim");
+            Shadow.add(Std140AlignmentType::InlineType::Float, "jitterRadius");
+            Shadow.add(Std140AlignmentType::InlineType::Float, "cascadeBlendDepth");
+            Shadow.add(Std140AlignmentType::InlineType::Uint, "nCascades");
+            Shadow.add(Std140AlignmentType::InlineType::Uint, "cascadeResolution");
+            Shadow.add(Cascade, "cascades", 6);
+            
             Std140AlignmentType FrameUBO;
             FrameUBO.add(Std140AlignmentType::InlineType::Mat4, "projectInv");
             FrameUBO.add(Std140AlignmentType::InlineType::Mat4, "viewInv");
-            FrameUBO.add(Light, "lights", 16);
+            FrameUBO.add(DirectionalLight, "light");
+            FrameUBO.add(Shadow, "shadow");
             return std::make_shared<StaticUBO>(FrameUBO);
         }
 
@@ -138,6 +162,20 @@ public:
         }
     }
     void init_render_targets() {
+        // cascaded shadowmap
+        _cascaded_shadowmap = otcv::ImageBuilder()
+            .size(cascaded_shadowmap_size, cascaded_shadowmap_size, 1)
+            .format(VK_FORMAT_D24_UNORM_S8_UINT)
+            .layers(cascaded_shadowmap_layers)
+            .usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+            .view_type(VK_IMAGE_VIEW_TYPE_2D_ARRAY)
+            .aspect(VK_IMAGE_ASPECT_DEPTH_BIT)
+            .build();
+        _cascaded_shadowmap->initialize_state(otcv::ResourceState::DepthStencilAttachment);
+        _cascaded_shadowsampler = otcv::SamplerBuilder()
+            .compare(VK_COMPARE_OP_LESS)
+            .build();
+
         // g-buffers
         _albedo_image = otcv::ImageBuilder()
             .size(window_width, window_height, 1)
@@ -172,16 +210,31 @@ public:
         _depth_image->initialize_state(otcv::ResourceState::DepthStencilAttachment);
         _depth_sampler = otcv::SamplerBuilder().build();
 
+        // lit image
         _lit_image = otcv::ImageBuilder()
             .size(window_width, window_height, 1)
-            .format(VK_FORMAT_R8G8B8A8_UNORM) // TODO: should support HDR
-            .usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+            .format(VK_FORMAT_R16G16B16A16_SFLOAT)
+            .usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
             .build();
         _lit_image->initialize_state(otcv::ResourceState::ColorAttachment);
+
+        // back buffer
+        _back_buffer = otcv::ImageBuilder()
+            .size(window_width, window_height, 1)
+            .format(_swapchain->image_info.format)
+            .usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+            .build();
+        _back_buffer->initialize_state(otcv::ResourceState::ColorAttachment);
+    }
+    void init_postprocess() {
+        _postprocess_manager.reset(new PostProcessManager("./spirv/post_process/", _lit_image, _back_buffer));
+    }
+    void init_shadow() {
+        _shadow_manager.reset(new ShadowManager("./spirv/shadows/", _cascaded_shadowmap, _object_ubo_manager, _swapchain->mock_images.size()));
     }
     void init_frame_contexts() {
         _command_pool = otcv::CommandPool::create(false, true);
-        _frame_desc_set_pool = std::make_shared<TrivialExpandableDescriptorPool>();
+        _frame_desc_set_pool = std::make_shared<NaiveExpandableDescriptorPool>();
 
         _frame_ctxs.resize(_swapchain->mock_images.size());
         for (FrameContext& ctx : _frame_ctxs) {
@@ -208,13 +261,21 @@ public:
         }
         _screen_quad = otcv::screen_quad_ndc();
     }
-
+    void init_texture() {
+        _noise_texture = NoiseTexture::disk_noise_texture(jitter_tile_size, jitter_strata_per_dim);
+        _noise_texture_sampler = otcv::SamplerBuilder()
+            .filter(VK_FILTER_NEAREST, VK_FILTER_NEAREST)
+            .address_mode(VK_SAMPLER_ADDRESS_MODE_REPEAT)
+            .build();
+    }
     void connect_render_targets() {
         for (FrameContext& ctx : _frame_ctxs) {
+            ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(1, &_depth_image, &_depth_sampler);
             ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(2, &_albedo_image, &_albedo_sampler);
             ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(3, &_normals_image, &_normals_sampler);
             ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(4, &_metallic_roughness_image, &_metallic_roughness_sampler);
-            ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(1, &_depth_image, &_depth_sampler);
+            ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(5, &_cascaded_shadowmap, &_cascaded_shadowsampler);
+            ctx.frame_desc_sets[RenderPassType::Lighting]->bind_image_sampler(6, &_noise_texture, &_noise_texture_sampler);
         }
     }
 
@@ -278,7 +339,7 @@ public:
             for (const PipelineBatch& pb : _g_pass_bind_order) {
                 otcv::GraphicsPipeline* pipeline = _material_manager->pipeline_cache->get(pb.pipeline);
                 // bind per frame descriptor set
-                cmd_buf->cmd_bind_descriptor_set(pipeline, f_ctx.frame_desc_sets[pass_type], DescriptorSetRate::PerFrameUBO);
+                cmd_buf->cmd_bind_descriptor_set(pipeline, f_ctx.frame_desc_sets[pass_type], DescriptorSetRate::PerFrame);
 
                 // bind pipeline
                 cmd_buf->cmd_bind_graphics_pipeline(pipeline);
@@ -342,11 +403,10 @@ public:
             .clear_value(1.0f, 0)
             .end();
         cmd_buf->cmd_begin_rendering(pass_begin);
-        // TODO: cover this with otcv::CommandBuffer functions
-        VkViewport viewport{ 0.0f, 0.0f, window_width, window_height, 0.0f, 1.0f };
-        vkCmdSetViewport(cmd_buf->vk_command_buffer, 0, 1, &viewport);
-        VkRect2D scissor{ {0, 0}, {window_width, window_height} };
-        vkCmdSetScissor(cmd_buf->vk_command_buffer, 0, 1, &scissor);
+
+        cmd_buf->cmd_set_viewport(window_width, window_height);
+        cmd_buf->cmd_set_scissor(window_width, window_height);
+
         draw_scene(RenderPassType::Geometry);
         cmd_buf->cmd_end_rendering();
 
@@ -380,16 +440,10 @@ public:
             assert(pbr_pipeline);
 
             cmd_buf->cmd_bind_graphics_pipeline(pbr_pipeline);
-            cmd_buf->cmd_bind_descriptor_set(pbr_pipeline, f_ctx.frame_desc_sets[RenderPassType::Lighting], DescriptorSetRate::PerFrameUBO);
+            cmd_buf->cmd_bind_descriptor_set(pbr_pipeline, f_ctx.frame_desc_sets[RenderPassType::Lighting], DescriptorSetRate::PerFrame);
             cmd_buf->cmd_bind_vertex_buffer(_screen_quad);
             vkCmdDraw(cmd_buf->vk_command_buffer, 3, 1, 0, 0);
         };
-
-        // TODO: cover this with otcv::CommandBuffer functions
-        VkViewport viewport{ 0.0f, 0.0f, window_width, window_height, 0.0f, 1.0f };
-        vkCmdSetViewport(cmd_buf->vk_command_buffer, 0, 1, &viewport);
-        VkRect2D scissor{ {0, 0}, {window_width, window_height} };
-        vkCmdSetScissor(cmd_buf->vk_command_buffer, 0, 1, &scissor);
 
         otcv::RenderingBegin pass_begin;
         pass_begin
@@ -401,6 +455,8 @@ public:
             .clear_value(0.0f, 0.0f, 0.0f, 1.0f)
             .end();
         cmd_buf->cmd_begin_rendering(pass_begin);
+        cmd_buf->cmd_set_viewport(window_width, window_height);
+        cmd_buf->cmd_set_scissor(window_width, window_height);
         lighting();
         cmd_buf->cmd_end_rendering();
 
@@ -409,8 +465,11 @@ public:
         cmd_buf->cmd_image_memory_barrier(_metallic_roughness_image, otcv::ResourceState::FragSample, otcv::ResourceState::ColorAttachment);
         cmd_buf->cmd_image_memory_barrier(_depth_image, otcv::ResourceState::FragSample, otcv::ResourceState::DepthStencilAttachment);
 
-        // insert a memory barrier at the end, so that blit commands will not start prematurely
-        cmd_buf->cmd_image_memory_barrier(_lit_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::TransferSrc);
+        // for shadowmaps
+        cmd_buf->cmd_image_memory_barrier(_cascaded_shadowmap, otcv::ResourceState::FragSample, otcv::ResourceState::DepthStencilAttachment);
+
+        // get ready for postprocess
+        cmd_buf->cmd_image_memory_barrier(_lit_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
     }
 
     void blit_commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id, uint32_t image_id) {
@@ -425,16 +484,15 @@ public:
             .dst_upper_bound(window_width, window_height);
 
         // TODO: blit the final image to swapchain image.
-        cmd_buf->cmd_image_blit(_lit_image, _swapchain->mock_image(image_id), region);
+        cmd_buf->cmd_image_blit(_back_buffer, _swapchain->mock_image(image_id), region);
 
         // insert a memory barrier at the end. Transition whatever images that graphics commands might draw on,
         // so that graphics commands for the next frame will wait behind the barrier and will not start prematurely
-        cmd_buf->cmd_image_memory_barrier(_lit_image, otcv::ResourceState::TransferSrc, otcv::ResourceState::ColorAttachment);
+        cmd_buf->cmd_image_memory_barrier(_back_buffer, otcv::ResourceState::TransferSrc, otcv::ResourceState::ColorAttachment);
         // for gui overlay to draw on. Also serves as synchronization point for later gui overlay to wait on
 
         cmd_buf->cmd_image_memory_barrier(_swapchain->mock_image(image_id),
             otcv::ResourceState::TransferDst, otcv::ResourceState::Present); // TODO: imgui in-flight support. Change the final state to ColorAttachment
-   
     }
 
     void draw_frame() {
@@ -446,18 +504,24 @@ public:
         vkAcquireNextImageKHR(_device, _swapchain->vk_swapchain, UINT64_MAX, f_ctx.image_available_semaphore->vk_semaphore, VK_NULL_HANDLE, &image_index);
 
         update_frame_ubos(_current_frame);
+        f_ctx.graphics_command_buffers[RenderPassType::Shadow]->reset();
+        f_ctx.graphics_command_buffers[RenderPassType::Shadow]->record(std::bind(&ShadowManager::commands, _shadow_manager.get(), std::placeholders::_1, _scene_graph, _current_frame));
         f_ctx.graphics_command_buffers[RenderPassType::Geometry]->reset();
         f_ctx.graphics_command_buffers[RenderPassType::Geometry]->record(std::bind(&Application::g_pass_commands, this, std::placeholders::_1, _current_frame));
         f_ctx.graphics_command_buffers[RenderPassType::Lighting]->reset();
         f_ctx.graphics_command_buffers[RenderPassType::Lighting]->record(std::bind(&Application::lighting_pass_commands, this, std::placeholders::_1, _current_frame));
+        f_ctx.graphics_command_buffers[RenderPassType::PostProcess]->reset();
+        f_ctx.graphics_command_buffers[RenderPassType::PostProcess]->record(std::bind(&PostProcessManager::commands, _postprocess_manager.get(), std::placeholders::_1));
         {
             otcv::QueueSubmit graphics_submit;
             graphics_submit
                 .batch()
+                    .add_command_buffer(f_ctx.graphics_command_buffers[RenderPassType::Shadow])
                     .add_command_buffer(f_ctx.graphics_command_buffers[RenderPassType::Geometry])
                     .add_command_buffer(f_ctx.graphics_command_buffers[RenderPassType::Lighting])
-                .end()
-                .signal(f_ctx.graphics_fence);
+                    .add_command_buffer(f_ctx.graphics_command_buffers[RenderPassType::PostProcess])
+                .end();
+            graphics_submit.signal(f_ctx.graphics_fence);
             _vulkan_context.queue->submit(graphics_submit);
         }
 
@@ -489,7 +553,7 @@ public:
     }
 
     void update_frame_ubos(uint32_t frame_id) {
-        // update camera for g-pass
+        // g-pass
         {
             glm::mat4 proj = cam.update_proj();
             glm::mat4 view = cam.update_view();
@@ -497,15 +561,52 @@ public:
             _frame_ctxs[frame_id].frame_ubos[RenderPassType::Geometry]->set(StaticUBOAccess()["projectView"], &proj_view);
         }
 
-        // TODO: update lighting pass ubo
+        glm::vec3 light_direction(2.0f, -7.0f, 1.0f);
+        // shadow pass
+        std::vector<CSM::CascadeContext> cascade_ctxs;
+        {
+            // TODO: fixed light direction for the moment
+            cascade_ctxs = std::move(_shadow_manager->update(light_direction, cam, frame_id, cascade_blend_depth));
+        }
+
+        // lighting pass
         {
             glm::mat4 proj = cam.update_proj();
             glm::mat4 view = cam.update_view();
             _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["projectInv"], &glm::inverse(proj));
             _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["viewInv"], &glm::inverse(view));
-            glm::vec3 color(1.2, 3.4, 5.6);
-            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["lights"][15]["color"], &color);
+
+            glm::vec3 color(1.0f);
+            float intensity = 2.0f;
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["light"]["intensity"], &intensity);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["light"]["color"], &color);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["light"]["direction"], &light_direction);
+
+            // these are not correct
+            glm::vec2 n_jitter_tiles((float)window_width / jitter_tile_size, (float)window_height / jitter_tile_size);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["nJitterTiles"], &n_jitter_tiles);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["nJitterStrataPerDim"], &jitter_strata_per_dim);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["jitterRadius"], &jitter_radius);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascadeBlendDepth"], &cascade_blend_depth);
+            uint32_t n_cascades = cascade_ctxs.size();
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["nCascades"], &n_cascades);
+            _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascadeResolution"], &cascaded_shadowmap_size);
+            for (uint32_t i = 0; i < cascade_ctxs.size(); ++i) {
+                _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascades"][i]["zBegin"], &cascade_ctxs[i].z_begin);
+                _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascades"][i]["zEnd"], &cascade_ctxs[i].z_end);
+                _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascades"][i]["lightSpaceView"], &cascade_ctxs[i].light_view);
+                _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascades"][i]["lightSpaceProject"], &cascade_ctxs[i].light_proj);
+            }
+
+            // uint32_t n_cascades = cascade_ctxs.size();
+            // _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["nCascades"], &n_cascades);
+            // for (uint32_t i = 0; i < cascade_ctxs.size(); ++i) {
+            //     _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["cascades"][i]["zBegin"], &cascade_ctxs[i].z_begin);
+            //     _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["cascades"][i]["zEnd"], &cascade_ctxs[i].z_end);
+            //     _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["cascades"][i]["lightSpaceProjectView"], &cascade_ctxs[i].light_pv);
+            // }
         }
+
     }
 
     void cleanup_scene() {
@@ -533,7 +634,7 @@ public:
         glfwTerminate();
     }
 
-    // Boiler plate stuff
+    // Boilerplate stuff
     GLFWwindow* _window = nullptr;
     otcv::Context _vulkan_context;
     VkInstance _instance = VK_NULL_HANDLE;
@@ -543,6 +644,10 @@ public:
     otcv::Swapchain* _swapchain;
 
     otcv::CommandPool* _command_pool;
+
+    // cascaded shadow maps
+    otcv::Image* _cascaded_shadowmap;
+    otcv::Sampler* _cascaded_shadowsampler;
 
     // G-buffers
     otcv::Image* _albedo_image;
@@ -557,12 +662,19 @@ public:
     // lit image
     otcv::Image* _lit_image;
 
+    // final image
+    otcv::Image* _back_buffer;
+
+    // noise texture for shadowmaps
+    otcv::Image* _noise_texture;
+    otcv::Sampler* _noise_texture_sampler;
+
     // UBOs
     // per object
     std::shared_ptr<DynamicUBOManager> _object_ubo_manager;
     // per frame
     // std::shared_ptr<SingleTypeExpandableDescriptorPool> _frame_ubo_desc_pool;
-    std::shared_ptr<TrivialExpandableDescriptorPool> _frame_desc_set_pool;
+    std::shared_ptr<NaiveExpandableDescriptorPool> _frame_desc_set_pool;
 
     struct FrameContext {
         // per-frame ubo
@@ -590,10 +702,13 @@ public:
     std::shared_ptr<MaterialManager> _material_manager;
     SceneGraph _scene_graph;
     BindOrder _g_pass_bind_order;
+
+    std::shared_ptr<PostProcessManager> _postprocess_manager;
+    std::shared_ptr<ShadowManager> _shadow_manager;
 };
 
 int main(int argc, char** argv)
-{
+{    
     Application app;
     app.run();
     app.cleanup();

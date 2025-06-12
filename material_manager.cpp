@@ -335,9 +335,7 @@ MaterialHandle MaterialManager::add_material(const MaterialData& material) {
 		otcv::GraphicsPipelineBuilder pipeline_builder;
 		pipeline_builder.pipline_rendering()
 			// TODO: should consider HDR rendering
-			.add_color_attachment_format(VK_FORMAT_R8G8B8A8_UNORM)
-			/// TODO: depth test to accomodate mock depth attachment
-			.depth_stencil_attachment_format(VK_FORMAT_D24_UNORM_S8_UINT)
+			.add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT)
 			.end();
 		pipeline_builder
 			.shader_vertex(_shader_blob[RenderPassType::Lighting]["screen_quad.vert"]);
@@ -400,7 +398,7 @@ otcv::DescriptorSetLayout* MaterialManager::per_frame_desc_set_layout(RenderPass
 		assert(pipeline);
 		break;
 	}
-	return pipeline->desc_set_layouts[DescriptorSetRate::PerFrameUBO];
+	return pipeline->desc_set_layouts[DescriptorSetRate::PerFrame];
 }
 
 LightingModel MaterialManager::deduce_lighting_model(const MaterialData& material) {
