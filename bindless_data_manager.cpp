@@ -285,7 +285,12 @@ otcv::Image* BindlessDataManager::upload_image_async(ImageData& img_data, bool s
 		imb.swizzle(VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R);
 	}
 	otcv::Image* image = new otcv::Image(imb);
-	image->populate_async(img_data.pixel_data.data(), img_data.pixel_data.size(), otcv::ResourceState::FragSample);
+	image->populate_async(
+		img_data.pixel_data.data(),
+		img_data.pixel_data.size(),
+		otcv::ResourceState::FragSample,
+		otcv::ResourceState::Created,
+		otcv::Image::SyncType::GPUBarrier);
 	return image;
 }
 
@@ -432,9 +437,9 @@ bool BindlessDataManager::set_materials(const MaterialResources& mat_res) {
 	_bindless_material_desc_set->bind_buffer_array(0, _material_ubos->_buf, 0, _material_ubos->_stride, _material_ubos->_n_ubos);
 
 	// wait for async image uploads
-	for (uint32_t i = 0; i < _images.size(); ++i) {
-		_images[i]->wait_for_async();
-	}
+	//for (uint32_t i = 0; i < _images.size(); ++i) {
+	//	_images[i]->wait_for_async();
+	//}
 	return true;
 }
 
@@ -467,7 +472,7 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 			.usage(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
 			.host_access(otcv::BufferBuilder::Access::Invisible);
 		_ib = new otcv::Buffer(ibb);
-		_ib->populate(indices.data());
+		_ib->populate_async(indices.data(), otcv::Buffer::SyncType::GPUBarrier, otcv::ResourceState::IndexRead, otcv::ResourceState::Created);
 	}
 
 	// build vertex buffer
@@ -564,7 +569,7 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 			vb_builder.add_binding(b_builder, tangents.data());
 			vb_builder.add_attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(glm::vec4));
 		}
-		_vb = new otcv::VertexBuffer(vb_builder);
+		_vb = new otcv::VertexBuffer(vb_builder, otcv::VertexBuffer::BufferDataUpload::AsyncGPUBarrier);
 	}
 	
 	// build object ubos

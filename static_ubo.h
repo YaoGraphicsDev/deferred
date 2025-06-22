@@ -126,6 +126,7 @@ struct SSBO {
 		std::vector<AccessContext> access_ctxs;
 	};
 	// should only be used for initializtion. As it idle waits for transfer to finish
+	// provide asyn version
 	void write(std::vector<WriteContext>& writes);
 
 	Std430AlignmentType::Range range_of(uint32_t id, SSBOAccess& acc);

@@ -262,6 +262,7 @@ void SSBO::write(std::vector<WriteContext>& writes) {
             std::memcpy(_staging_buf.data() + _stride * write.id + range.offset, value, range.size);
         }
     }
+
     _buf->populate(_staging_buf.data());
 }
 
