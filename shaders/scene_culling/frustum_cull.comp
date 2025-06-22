@@ -1,0 +1,88 @@
+#version 450
+layout(local_size_x = 64) in;
+
+struct AABB {
+    vec3 min;
+    vec3 max;
+};
+
+struct ObjectData {
+    mat4 model;
+    AABB aabb;
+    uint indexCount;
+    uint firstIndex;
+    int  vertexOffset;
+    // back face culled -- 0
+    // double sided -- 1
+    uint pipelineVariant;
+};
+
+layout(std140, set = 0, binding = 0) uniform UBO {
+    mat4 projectInv;
+    mat4 viewInv;
+} Ubo;
+
+layout(std430, set = 1, binding = 0) readonly buffer ObjectBuffer {
+    ObjectData objects[];
+};
+
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 2, binding = 0) writeonly buffer IndirectBuffer {
+    // flat 2d array indexed by [nObj * row + col]
+    // one row for each pipeline variant
+    DrawCommand commands[];
+};
+
+struct DrawCount {
+    uint value;
+};
+
+layout(std430, set = 2, binding = 1) writeonly buffer DrawCountBuffer {
+    // a count number for each pipeline variant
+    DrawCount counts[];
+};
+
+bool is_visible(uint id) {
+    // TODO: frustum culling
+    return true;
+}
+
+void main() {
+    uint objId = gl_GlobalInvocationID.x;
+    uint nObj = objects.length();
+    if (objId >= nObj) {
+        return;
+    }
+
+    if (!is_visible(objId)) {
+        return;
+    }
+
+    ObjectData obj = objects[objId];
+    uint index = atomicAdd(counts[obj.pipelineVariant].value, 1); // atomic counter to count visible draws
+
+    DrawCommand cmd;
+    cmd.indexCount    = obj.indexCount;
+    cmd.instanceCount = 1;
+    cmd.firstIndex    = obj.firstIndex;
+    cmd.vertexOffset  = obj.vertexOffset;
+    cmd.firstInstance = objId;  // connect to shaders
+
+    uint cmd_id = nObj * obj.pipelineVariant + index;
+    commands[cmd_id] = cmd;
+
+    /*if (o.isSprite == 1u) {
+        uint idx = atomicAdd(spriteCount, 1);
+        spriteCmds[idx] = cmd;
+    } else {
+        uint idx = atomicAdd(meshCount, 1);
+        meshCmds[idx] = cmd;
+    }*/
+}

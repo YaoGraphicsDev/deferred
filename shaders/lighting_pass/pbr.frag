@@ -236,7 +236,7 @@ void main() {
 	
 	vec4 albedo = texture(samplerAlbedo, inUV);
     vec3 normal = texture(samplerNormal, inUV).xyz;
-    normal = normalize(normal * vec3(2.0f) - vec3(1.0f));
+    normal = normalize(normal);
 
     float zView = -viewSpaceCoord.z;
     uint targetCascade = 0;

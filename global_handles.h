@@ -1,5 +1,9 @@
 #pragma once
 
+struct AttributeHandle {
+	size_t id;
+};
+
 struct MaterialHandle {
 	size_t id;
 	bool operator<(const MaterialHandle& other) const {
@@ -8,6 +12,12 @@ struct MaterialHandle {
 	bool operator==(const MaterialHandle& other) const {
 		return this->id == other.id;
 	}
+};
+
+struct TextureHandle {
+	size_t id;
+	size_t offset;
+	size_t length;
 };
 
 struct DescriptorSetInfoHandle {

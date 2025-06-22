@@ -4,7 +4,8 @@
 #include "input_handler.h"
 #include "arcball.h"
 
-#include "gltf_parser.h"
+#include "gltf_parser_bindless.h"
+#include "render_global_types.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -51,6 +52,7 @@ public:
         if (!load_scene()) {
             std::cout << "scene load error" << std::endl;
         }
+        init_lighting_pipeline();
         init_render_targets();
         init_frame_contexts();
         init_texture();
@@ -141,15 +143,6 @@ public:
         return nullptr;
     }
 
-    otcv::DescriptorSet* init_frame_desc_sets(RenderPassType pass) {
-        otcv::DescriptorSetLayout* per_frame_set_layout = _material_manager->per_frame_desc_set_layout(pass);
-        if (!per_frame_set_layout) {
-            return nullptr;
-        }
-        
-        return _frame_desc_set_pool->allocate(per_frame_set_layout);
-    }
-
     void init_vulkan_context() {
         _vulkan_context = otcv::create_context(_window);
         _instance = _vulkan_context.instance->vk_instance;
@@ -187,7 +180,8 @@ public:
 
         _normals_image = otcv::ImageBuilder()
             .size(window_width, window_height, 1)
-            .format(VK_FORMAT_R8G8B8A8_UNORM)
+            //.format(VK_FORMAT_R8G8B8A8_UNORM)
+            .format(VK_FORMAT_R16G16B16A16_SFLOAT)
             .usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
             .build();
         _normals_image->initialize_state(otcv::ResourceState::ColorAttachment);
@@ -230,8 +224,40 @@ public:
         _postprocess_manager.reset(new PostProcessManager("./spirv/post_process/", _lit_image, _back_buffer));
     }
     void init_shadow() {
-        _shadow_manager.reset(new ShadowManager("./spirv/shadows/", _cascaded_shadowmap, _object_ubo_manager, _swapchain->mock_images.size()));
+        _shadow_manager.reset(new ShadowManager(
+            "./spirv/shadows/",
+            "./spirv/scene_culling/",
+            _cascaded_shadowmap,
+            _scene_graph,
+            _scene_refs,
+            _bindless_data,
+            _swapchain->mock_images.size()));
     }
+    void init_lighting_pipeline() {
+        _lighting_shader_blob = std::move(otcv::load_shaders_from_dir("./spirv/lighting_pass"));
+        
+        otcv::GraphicsPipelineBuilder pipeline_builder;
+        pipeline_builder.pipline_rendering()
+            .add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT)
+            .end();
+        pipeline_builder
+            .shader_vertex(_lighting_shader_blob["screen_quad.vert"])
+            .shader_fragment(_lighting_shader_blob["pbr.frag"]);
+        {
+            otcv::VertexBufferBuilder vbb;
+            vbb.add_binding()
+                .add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
+                .add_attribute(0, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2));
+            pipeline_builder.vertex_state(vbb);
+        }
+        pipeline_builder
+            .add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
+            .add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
+        /// TODO: depth test to accomodate mock depth attachment
+        // pipeline_builder.depth_test();
+        _lighting_pipeline = pipeline_builder.build();
+    }
+
     void init_frame_contexts() {
         _command_pool = otcv::CommandPool::create(false, true);
         _frame_desc_set_pool = std::make_shared<NaiveExpandableDescriptorPool>();
@@ -243,9 +269,9 @@ public:
             ctx.frame_ubos[RenderPassType::Lighting] = init_frame_ubo(RenderPassType::Lighting);
 
             // per-frame descriptor sets 
-            ctx.frame_desc_sets[RenderPassType::Geometry] = init_frame_desc_sets(RenderPassType::Geometry);
+            ctx.frame_desc_sets[RenderPassType::Geometry] = _frame_desc_set_pool->allocate(_bindless_data->frame_descriptor_set_layout());
             ctx.frame_desc_sets[RenderPassType::Geometry]->bind_buffer(0, ctx.frame_ubos[RenderPassType::Geometry]->_buf);
-            ctx.frame_desc_sets[RenderPassType::Lighting] = init_frame_desc_sets(RenderPassType::Lighting);
+            ctx.frame_desc_sets[RenderPassType::Lighting] = _frame_desc_set_pool->allocate(_lighting_pipeline->desc_set_layouts[DescriptorSetRate::PerFrame]);
             ctx.frame_desc_sets[RenderPassType::Lighting]->bind_buffer(0, ctx.frame_ubos[RenderPassType::Lighting]->_buf);
 
             // sync objects
@@ -296,16 +322,31 @@ public:
         ImGui_ImplOTCV_Init(&info);
     }
     bool load_scene() {
-        std::map<RenderPassType, std::string> pass_shader_map = 
-        { {RenderPassType::Geometry, "./spirv/geometry_pass/"},
-            {RenderPassType::Lighting, "./spirv/lighting_pass/"}};
-        _material_manager = std::make_shared<MaterialManager>(_physical_device, pass_shader_map);
-        _object_ubo_manager = std::make_shared<DynamicUBOManager>(_physical_device);
+        bool ret = load_gltf(
+            "C:/Users/Liyao/Sources/Sponza/glTF/Sponza.gltf",
+            _scene_graph,
+            _scene_refs,
+            _material_res);
 
-        bool ret = load_gltf("C:/Users/Liyao/Sources/Sponza/glTF/Sponza.gltf", _scene_graph,
-            _material_manager, _object_ubo_manager);
+        _bindless_data.reset(new BindlessDataManager(
+            _physical_device,
+            "./spirv/geometry_pass_bindless/",
+            _scene_refs.size(),
+            _material_res.materials.size(),
+            _material_res.images.size(),
+            _material_res.sampler_cfgs.size()));
 
-        _g_pass_bind_order = std::move(sort_draw_bind_order(_scene_graph, _material_manager, _object_ubo_manager, RenderPassType::Geometry));
+        _bindless_data->set_materials(_material_res);
+        _bindless_data->set_objects(_scene_graph, _scene_refs);
+        
+        
+        _culling.reset(new SceneCulling(
+            "./spirv/scene_culling/",
+            _scene_graph,
+            _scene_refs,
+            _swapchain->mock_images.size()));
+        _culling_in = _culling->create_object_buffer_context(_scene_graph, _scene_refs, _bindless_data);
+        _culling_out = _culling->create_indirect_command_context((uint32_t)PipelineVariant::All, _bindless_data);
 
         return ret;
     }
@@ -314,66 +355,7 @@ public:
     void g_pass_commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
         FrameContext& f_ctx = _frame_ctxs[frame_id];
 
-        auto bind_dynamic_ubo = [&](
-            otcv::GraphicsPipeline* pipeline,
-            DynamicUBOManager& ubo_manager,
-            DescriptorSetInfoHandle& handle,
-            DescriptorSetRate set_rate) {
-
-            DynamicUBOManager::DescriptorSetInfo desc_set_info =
-                std::move(ubo_manager.get_descriptor_set_info(handle));
-            otcv::DescriptorSet* desc_set = ubo_manager.desc_set_cache[desc_set_info.key];
-            // bind dynamic UBO with offset
-            std::vector<uint32_t> dynamic_offsets;
-            for (auto& acc : desc_set_info.ubo_accesses) {
-                dynamic_offsets.push_back(acc.offset);
-            }
-            cmd_buf->cmd_bind_descriptor_set(pipeline, desc_set, set_rate, dynamic_offsets);
-        };
-
-        auto draw_scene = [&](RenderPassType pass_type) {
-            if (_g_pass_bind_order.empty()) {
-                return;
-            }
-            assert(f_ctx.frame_desc_sets.find(pass_type) != f_ctx.frame_desc_sets.end());
-            for (const PipelineBatch& pb : _g_pass_bind_order) {
-                otcv::GraphicsPipeline* pipeline = _material_manager->pipeline_cache->get(pb.pipeline);
-                // bind per frame descriptor set
-                cmd_buf->cmd_bind_descriptor_set(pipeline, f_ctx.frame_desc_sets[pass_type], DescriptorSetRate::PerFrame);
-
-                // bind pipeline
-                cmd_buf->cmd_bind_graphics_pipeline(pipeline);
-                for (const MaterialBatch& mb : pb.material_batches) {
-                    MaterialManager::PipelineState p_state =
-                        std::move(_material_manager->get_pipeline_state(mb.material, pass_type));
-
-                    bind_dynamic_ubo(
-                        pipeline,
-                        *_material_manager->ubo_manager,
-                        p_state.material_ubo_set_handle,
-                        DescriptorSetRate::PerMaterialUBO);
-
-                    // textures
-                    cmd_buf->cmd_bind_descriptor_set(pipeline, p_state.texture_desc_set, DescriptorSetRate::PerMaterialTexture);
-
-                    for (const RenderableId& r : mb.renderables) {
-                        // geometries
-                        SceneNode& node = _scene_graph[r.scene_node_id];
-                        Renderable& renderable = node.renderables[r.renderable_id];
-
-                        bind_dynamic_ubo(
-                            pipeline,
-                            *_object_ubo_manager,
-                            node.object_ubo_set_handle,
-                            DescriptorSetRate::PerObjectUBO);
-
-                        cmd_buf->cmd_bind_vertex_buffer(renderable.mesh->vb);
-                        cmd_buf->cmd_bind_index_buffer(renderable.mesh->ib, VK_INDEX_TYPE_UINT16);
-                        vkCmdDrawIndexed(cmd_buf->vk_command_buffer, renderable.mesh->ib->builder._info.size / sizeof(uint16_t), 1, 0, 0, 0);
-                    }
-                }
-            }
-        };
+        _culling->commands(cmd_buf, _culling_in, _culling_out, frame_id);
 
         otcv::RenderingBegin pass_begin;
         pass_begin
@@ -403,17 +385,40 @@ public:
             .clear_value(1.0f, 0)
             .end();
         cmd_buf->cmd_begin_rendering(pass_begin);
-
+        
         cmd_buf->cmd_set_viewport(window_width, window_height);
         cmd_buf->cmd_set_scissor(window_width, window_height);
-
-        draw_scene(RenderPassType::Geometry);
+        
+        
+        cmd_buf->cmd_bind_vertex_buffer(_bindless_data->_vb);
+        cmd_buf->cmd_bind_index_buffer(_bindless_data->_ib, VK_INDEX_TYPE_UINT16);
+        
+        for (uint32_t pipeline_variant = 0; pipeline_variant < (uint32_t)PipelineVariant::All; ++pipeline_variant) {
+            otcv::GraphicsPipeline* pipeline = _bindless_data->_pipeline_bins[(PipelineVariant)pipeline_variant];
+            cmd_buf->cmd_bind_graphics_pipeline(pipeline);
+        
+            cmd_buf->cmd_bind_descriptor_set(pipeline, _frame_ctxs[frame_id].frame_desc_sets[RenderPassType::Geometry], DescriptorSetRate::PerFrame);
+            cmd_buf->cmd_bind_descriptor_set(pipeline, _bindless_data->_bindless_object_desc_set, DescriptorSetRate::PerObject);
+            cmd_buf->cmd_bind_descriptor_set(pipeline, _bindless_data->_bindless_material_desc_set, DescriptorSetRate::PerMaterial);
+        
+            uint32_t n_obj = _scene_refs.size();
+            Std430AlignmentType::Range command_range = _culling_out.ssbo_commands->range_of(pipeline_variant * n_obj, SSBOAccess());
+            Std430AlignmentType::Range count_range = _culling_out.ssbo_draw_count->range_of(pipeline_variant, SSBOAccess());
+            cmd_buf->cmd_draw_indexed_indirect_count(
+                _culling_out.ssbo_commands->_buf,
+                command_range.offset,
+                _culling_out.ssbo_draw_count->_buf, count_range.offset, n_obj, command_range.stride);
+        }
+        
         cmd_buf->cmd_end_rendering();
 
         cmd_buf->cmd_image_memory_barrier(_albedo_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
         cmd_buf->cmd_image_memory_barrier(_normals_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
         cmd_buf->cmd_image_memory_barrier(_metallic_roughness_image, otcv::ResourceState::ColorAttachment, otcv::ResourceState::FragSample);
         cmd_buf->cmd_image_memory_barrier(_depth_image, otcv::ResourceState::DepthStencilAttachment, otcv::ResourceState::FragSample);
+
+        cmd_buf->cmd_buffer_memory_barrier(_culling_out.ssbo_commands->_buf, otcv::ResourceState::IndirectRead, otcv::ResourceState::ComputeSSBOWrite);
+        cmd_buf->cmd_buffer_memory_barrier(_culling_out.ssbo_draw_count->_buf, otcv::ResourceState::IndirectRead, otcv::ResourceState::ComputeSSBOWrite);
     }
 
     void lighting_pass_commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
@@ -423,24 +428,9 @@ public:
             assert(f_ctx.frame_desc_sets.find(RenderPassType::Lighting) != f_ctx.frame_desc_sets.end());
             // TODO: one lighting model might be shared across different materials.
             // Just use pbr model now
-            
-            // Temp: Grab the first material that uses pbr model
-            otcv::GraphicsPipeline* pbr_pipeline = nullptr;
-            for (auto& node : _scene_graph) {
-                for (auto& r : node.renderables) {
-                    MaterialManager::Material mat = std::move(_material_manager->get_material(r.material->material_handle));
-                    if (mat.lighting.model == LightingModel::Model::PBR) {
-                        PipelineHandle p_hdl = mat.pass_action[RenderPassType::Lighting].pipeline_handle;
-                        pbr_pipeline = _material_manager->pipeline_cache->get(p_hdl);
-                        break;
-                    }
-                }
-                
-            }
-            assert(pbr_pipeline);
 
-            cmd_buf->cmd_bind_graphics_pipeline(pbr_pipeline);
-            cmd_buf->cmd_bind_descriptor_set(pbr_pipeline, f_ctx.frame_desc_sets[RenderPassType::Lighting], DescriptorSetRate::PerFrame);
+            cmd_buf->cmd_bind_graphics_pipeline(_lighting_pipeline);
+            cmd_buf->cmd_bind_descriptor_set(_lighting_pipeline, f_ctx.frame_desc_sets[RenderPassType::Lighting], DescriptorSetRate::PerFrame);
             cmd_buf->cmd_bind_vertex_buffer(_screen_quad);
             vkCmdDraw(cmd_buf->vk_command_buffer, 3, 1, 0, 0);
         };
@@ -505,7 +495,7 @@ public:
 
         update_frame_ubos(_current_frame);
         f_ctx.graphics_command_buffers[RenderPassType::Shadow]->reset();
-        f_ctx.graphics_command_buffers[RenderPassType::Shadow]->record(std::bind(&ShadowManager::commands, _shadow_manager.get(), std::placeholders::_1, _scene_graph, _current_frame));
+        f_ctx.graphics_command_buffers[RenderPassType::Shadow]->record(std::bind(&ShadowManager::commands, _shadow_manager.get(), std::placeholders::_1, _current_frame));
         f_ctx.graphics_command_buffers[RenderPassType::Geometry]->reset();
         f_ctx.graphics_command_buffers[RenderPassType::Geometry]->record(std::bind(&Application::g_pass_commands, this, std::placeholders::_1, _current_frame));
         f_ctx.graphics_command_buffers[RenderPassType::Lighting]->reset();
@@ -557,6 +547,8 @@ public:
         {
             glm::mat4 proj = cam.update_proj();
             glm::mat4 view = cam.update_view();
+            _culling->update(glm::inverse(proj), glm::inverse(view), frame_id);
+
             glm::mat4 proj_view = proj * view;
             _frame_ctxs[frame_id].frame_ubos[RenderPassType::Geometry]->set(StaticUBOAccess()["projectView"], &proj_view);
         }
@@ -597,22 +589,12 @@ public:
                 _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascades"][i]["lightSpaceView"], &cascade_ctxs[i].light_view);
                 _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["shadow"]["cascades"][i]["lightSpaceProject"], &cascade_ctxs[i].light_proj);
             }
-
-            // uint32_t n_cascades = cascade_ctxs.size();
-            // _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["nCascades"], &n_cascades);
-            // for (uint32_t i = 0; i < cascade_ctxs.size(); ++i) {
-            //     _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["cascades"][i]["zBegin"], &cascade_ctxs[i].z_begin);
-            //     _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["cascades"][i]["zEnd"], &cascade_ctxs[i].z_end);
-            //     _frame_ctxs[frame_id].frame_ubos[RenderPassType::Lighting]->set(StaticUBOAccess()["cascades"][i]["lightSpaceProjectView"], &cascade_ctxs[i].light_pv);
-            // }
         }
 
     }
 
     void cleanup_scene() {
         _scene_graph.clear();
-        _material_manager = nullptr;
-        _object_ubo_manager = nullptr;
     }
 
     void cleanup_imgui() {
@@ -661,6 +643,8 @@ public:
 
     // lit image
     otcv::Image* _lit_image;
+    otcv::GraphicsPipeline* _lighting_pipeline;
+    otcv::ShaderBlob _lighting_shader_blob;
 
     // final image
     otcv::Image* _back_buffer;
@@ -670,10 +654,7 @@ public:
     otcv::Sampler* _noise_texture_sampler;
 
     // UBOs
-    // per object
-    std::shared_ptr<DynamicUBOManager> _object_ubo_manager;
     // per frame
-    // std::shared_ptr<SingleTypeExpandableDescriptorPool> _frame_ubo_desc_pool;
     std::shared_ptr<NaiveExpandableDescriptorPool> _frame_desc_set_pool;
 
     struct FrameContext {
@@ -699,9 +680,14 @@ public:
     std::shared_ptr<InputHandler> _input_handler;
     Arcball _arcball;
 
-    std::shared_ptr<MaterialManager> _material_manager;
     SceneGraph _scene_graph;
-    BindOrder _g_pass_bind_order;
+    SceneGraphFlatRefs _scene_refs;
+    MaterialResources _material_res;
+    std::shared_ptr<BindlessDataManager> _bindless_data;
+
+    std::shared_ptr<SceneCulling> _culling;
+    SceneCulling::ObjectBufferContext _culling_in;
+    SceneCulling::IndirectCommandContext _culling_out;
 
     std::shared_ptr<PostProcessManager> _postprocess_manager;
     std::shared_ptr<ShadowManager> _shadow_manager;

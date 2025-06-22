@@ -2,17 +2,23 @@
 
 
 ShadowManager::ShadowManager(
-	const std::string& shader_path,
+	const std::string& shadow_shader_path,
+	const std::string& culling_shader_path,
 	otcv::Image* shadowmap,
-	std::shared_ptr<DynamicUBOManager> object_ubo_manager,
-	uint32_t _in_flight_frames) {
+	const SceneGraph& scene,
+	const SceneGraphFlatRefs& scene_refs,
+	std::shared_ptr<BindlessDataManager> bindless_data,
+	uint32_t in_flight_frames) {
+
 	_shadowmap = shadowmap;
 
-	otcv::ShaderLoadHint hint;
-	std::set<uint16_t> dynamic_sets = { DescriptorSetRate::PerObjectUBO };
-	hint.vertex_hint = otcv::ShaderLoadHint::Hint::DynamicUBO;
-	hint.vertex_custom = &dynamic_sets;
-	_shader_blob = std::move(otcv::load_shaders_from_dir(shader_path, hint));
+	std::map<uint32_t, uint32_t> vs_indexing_limits = {
+		{otcv::pack(DescriptorSetRate::PerObject, 0), scene_refs.size()}
+	};
+	std::map<std::string, otcv::ShaderLoadHint> file_hints = {
+		{"cascaded_shadow.vert", {otcv::ShaderLoadHint::Hint::DescriptorIndexing, &vs_indexing_limits}}
+	};
+	_shader_blob = std::move(otcv::load_shaders_from_dir(shadow_shader_path, file_hints));
 
 	otcv::GraphicsPipelineBuilder pipeline_builder;
 	pipeline_builder.pipline_rendering()
@@ -33,9 +39,10 @@ ShadowManager::ShadowManager(
 
 	_desc_pool.reset(new NaiveExpandableDescriptorPool());
 
-	_frame_ctxs.resize(_in_flight_frames);
+	_frame_ctxs.resize(in_flight_frames);
+	uint32_t n_cascades = shadowmap->builder._image_info.arrayLayers;
 	for (FrameContext& frame : _frame_ctxs) {
-		frame.resize(shadowmap->builder._image_info.arrayLayers);
+		frame.resize(n_cascades); // number of cascades
 		for (CascadeContext& cascade : frame) {
 			cascade.desc_set = _desc_pool->allocate(_pipeline->desc_set_layouts[DescriptorSetRate::PerFrame]);
 
@@ -47,8 +54,16 @@ ShadowManager::ShadowManager(
 		}
 	}
 
-	// per object UBO is managed by dynamic ubo manager
-	_object_ubo_manager = object_ubo_manager;
+	_bindless_data = bindless_data;
+
+	_scene_cullings.resize(n_cascades);
+	_culling_out.resize(n_cascades);
+	for (uint32_t i = 0; i < n_cascades; ++i) {
+		_scene_cullings[i].reset(new SceneCulling(culling_shader_path, scene, scene_refs, in_flight_frames));
+		_culling_out[i] = _scene_cullings[i]->create_indirect_command_context((uint32_t)PipelineVariant::All, _bindless_data);
+	}
+	_culling_in = _scene_cullings[0]->create_object_buffer_context(scene, scene_refs, _bindless_data);
+	_n_obj = scene_refs.size();
 }
 
 ShadowManager::~ShadowManager() {
@@ -67,19 +82,26 @@ std::vector<CSM::CascadeContext> ShadowManager::update(glm::vec3 light_dir, Pers
 	StaticUBOAccess acc;
 	acc["projectView"];
 	FrameContext& frame_ctx = _frame_ctxs[frame_id];
-	for (uint32_t i = 0; i < frame_ctx.size(); ++i) {
-		glm::mat4 light_pv = cascade_ctxs[i].light_proj * cascade_ctxs[i].light_view;
-		frame_ctx[i].ubo->set(acc, &(light_pv));
+	for (uint32_t cascade = 0; cascade < frame_ctx.size(); ++cascade) {
+		// traverse and update cascades
+		glm::mat4 light_pv = cascade_ctxs[cascade].light_proj * cascade_ctxs[cascade].light_view;
+		frame_ctx[cascade].ubo->set(acc, &(light_pv));
+
+		// update culling
+		_scene_cullings[cascade]->update(glm::inverse(cascade_ctxs[cascade].light_proj), glm::inverse(cascade_ctxs[cascade].light_view), frame_id);
 	}
 	return cascade_ctxs;
 }
 
-void ShadowManager::commands(otcv::CommandBuffer* cmd_buf, SceneGraph& scene, uint32_t frame_id) {
+void ShadowManager::commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
 	// TODO: ensure an _shadowmap image is already transitioned to ResourceState::DepthStencilAttachment state
 
 	uint32_t width = _shadowmap->builder._image_info.extent.width;
 	uint32_t height = _shadowmap->builder._image_info.extent.height;
 	for (uint32_t cascade = 0; cascade < _shadowmap->builder._image_info.arrayLayers; ++cascade) {
+		// cull frustum 
+		_scene_cullings[cascade]->commands(cmd_buf, _culling_in, _culling_out[cascade], frame_id);
+
 		otcv::RenderingBegin pass_begin;
 		pass_begin
 			.area(width, height)
@@ -94,31 +116,32 @@ void ShadowManager::commands(otcv::CommandBuffer* cmd_buf, SceneGraph& scene, ui
 		cmd_buf->cmd_set_viewport(width, height);
 		cmd_buf->cmd_set_scissor(width, height);
 
-		// TODO: perhaps cram it in with materials? Like what I'm going to do with lighting models?
+		cmd_buf->cmd_bind_descriptor_set(_pipeline, _frame_ctxs[frame_id][cascade].desc_set, DescriptorSetRate::PerFrame);
+		cmd_buf->cmd_bind_descriptor_set(_pipeline, _bindless_data->_bindless_object_desc_set, DescriptorSetRate::PerObject);
+		cmd_buf->cmd_bind_vertex_buffer(_bindless_data->_vb);
+		cmd_buf->cmd_bind_index_buffer(_bindless_data->_ib, VK_INDEX_TYPE_UINT16);
+
 		cmd_buf->cmd_bind_graphics_pipeline(_pipeline);
 
-		cmd_buf->cmd_bind_descriptor_set(_pipeline, _frame_ctxs[frame_id][cascade].desc_set, DescriptorSetRate::PerFrame);
-
-		for (SceneNode& node : scene) {
-			DescriptorSetInfoHandle set_handle = node.object_ubo_set_handle;
-			for (Renderable& r : node.renderables) {
-				DynamicUBOManager::DescriptorSetInfo desc_set_info =
-					std::move(_object_ubo_manager->get_descriptor_set_info(set_handle));
-				otcv::DescriptorSet* desc_set = _object_ubo_manager->desc_set_cache[desc_set_info.key];
-				// bind dynamic UBO with offset
-				std::vector<uint32_t> dynamic_offsets;
-				for (auto& acc : desc_set_info.ubo_accesses) {
-					dynamic_offsets.push_back(acc.offset);
-				}
-				cmd_buf->cmd_bind_descriptor_set(_pipeline, desc_set, DescriptorSetRate::PerObjectUBO, dynamic_offsets);
-
-				cmd_buf->cmd_bind_vertex_buffer(r.mesh->vb);
-				cmd_buf->cmd_bind_index_buffer(r.mesh->ib, VK_INDEX_TYPE_UINT16);
-				vkCmdDrawIndexed(cmd_buf->vk_command_buffer, r.mesh->ib->builder._info.size / sizeof(uint16_t), 1, 0, 0, 0);
-			}
+		// TODO: issuing a draw call for each pipeline variant is not really necessary 
+		// as shadow pipeline do not differentiate materials
+		// this can be solve by writing another version of frustum_cull.comp shader that puts all indirect commands in one place
+		for (uint32_t pipeline_variant = 0; pipeline_variant < (uint32_t)PipelineVariant::All; ++pipeline_variant) {
+			Std430AlignmentType::Range command_range = _culling_out[cascade].ssbo_commands->range_of(pipeline_variant * _n_obj, SSBOAccess());
+			Std430AlignmentType::Range count_range = _culling_out[cascade].ssbo_draw_count->range_of(pipeline_variant, SSBOAccess());
+			cmd_buf->cmd_draw_indexed_indirect_count(
+				_culling_out[cascade].ssbo_commands->_buf,
+				command_range.offset,
+				_culling_out[cascade].ssbo_draw_count->_buf,
+				count_range.offset,
+				_n_obj,
+				command_range.stride);
 		}
 
 		cmd_buf->cmd_end_rendering();
+
+		cmd_buf->cmd_buffer_memory_barrier(_culling_out[cascade].ssbo_commands->_buf, otcv::ResourceState::IndirectRead, otcv::ResourceState::ComputeSSBOWrite);
+		cmd_buf->cmd_buffer_memory_barrier(_culling_out[cascade].ssbo_draw_count->_buf, otcv::ResourceState::IndirectRead, otcv::ResourceState::ComputeSSBOWrite);
 	}
 
 	cmd_buf->cmd_image_memory_barrier(_shadowmap, otcv::ResourceState::DepthStencilAttachment, otcv::ResourceState::FragSample);
