@@ -95,9 +95,6 @@ enum class PipelineVariant : uint32_t {
     BackFaceCulled = 0,
     DoubleSided = 1,
     All = 2
-
-    // lighting pass
-    // PBR,
 };
 struct ObjectRef {
     uint32_t node_id;

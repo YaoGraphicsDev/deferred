@@ -4,6 +4,7 @@
 #include "gltf_scene_bindless.h"
 #include "static_ubo.h"
 #include "expandable_descriptor_pool.h"
+#include "mesh_preprocessor.h"
 
 #include <map>
 #include <vector>
@@ -12,7 +13,8 @@
 class BindlessDataManager {
 public:
 	BindlessDataManager(VkPhysicalDevice physical_device,
-		const std::string& shader_path,
+		const std::string& geometry_shader_path,
+		const std::string& mesh_preprocessor_path,
 		uint32_t n_objects,
 		uint32_t n_materials,
 		uint32_t n_images,
@@ -69,11 +71,13 @@ public:
 	otcv::DescriptorSet* _bindless_material_desc_set;
 
 	std::map<PipelineVariant, otcv::GraphicsPipeline*> _pipeline_bins;
-	otcv::ShaderBlob _shader_blob;
-	
+	otcv::ShaderBlob _geometry_shader_blob;
+
+	std::shared_ptr<MeshPreprocessor> _mesh_preprocessor;
+
 private:
 
-	void build_all_pipelines(const std::string& shader_path);
+	void build_all_pipelines(const std::string& geometry_shader_path);
 
 	void build_descriptor_sets();
 

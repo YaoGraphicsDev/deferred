@@ -33,7 +33,7 @@ public:
 private:
 	otcv::Image* _shadowmap;
 	otcv::ShaderBlob _shader_blob;
-	otcv::GraphicsPipeline* _pipeline;
+	std::map<PipelineVariant, otcv::GraphicsPipeline*> _pipeline_bins;
 	std::shared_ptr<NaiveExpandableDescriptorPool> _desc_pool;
 	struct CascadeContext {
 		otcv::DescriptorSet* desc_set;

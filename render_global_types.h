@@ -13,7 +13,7 @@ enum DescriptorSetRate {
 	PerObject = 1,
 	PerMaterial = 2,
 	ComputeRead = 1,
-	ComputeWrite
+	ComputeWrite = 2,
 };
 
 // struct LightingModel {

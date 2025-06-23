@@ -1,4 +1,5 @@
 #include "csm.h"
+#include "math_common.h"
 #include <array>
 
 // https://developer.nvidia.com/gpugems/gpugems3/part-ii-light-and-shadows/chapter-10-parallel-split-shadow-maps-programmable-gpus
@@ -25,15 +26,8 @@ std::vector<std::pair<float, float>> CSM::split(float near, float far, uint32_t 
 	return partitions;
 }
 
-glm::vec3 CSM::ndc_to_world(glm::vec3 ndc, glm::mat4 proj_inv, glm::mat4 view_inv) {
-	glm::vec4 view_space_coord = proj_inv * glm::vec4(ndc, 1.0f);
-	view_space_coord = view_space_coord / view_space_coord.w;
-	glm::vec4 world_space_coord = view_inv * view_space_coord;
-	return world_space_coord;
-}
-
 // world space frustum
-CSM::SquareBound CSM::bound_frustum(glm::mat3 light_space_inv, uint32_t resolution, const Frustum& frustum) {
+CSM::SquareBound CSM::bound_frustum(glm::mat3 light_space_inv, uint32_t resolution, const FrustumUtils::Frustum& frustum) {
 	// radius and center of bounding sphere
 	float r = glm::length(frustum[0] - frustum[6]) * 0.5f;
 	glm::vec3 c = (frustum[0] + frustum[6]) * 0.5f;
@@ -60,27 +54,17 @@ std::vector<CSM::CascadeContext> CSM::csm_ortho_projections(
 	float blend_overlap) {
 
 	//determine light space
-	glm::vec3 z = glm::normalize(light_dir);
+	glm::vec3 z = -glm::normalize(light_dir);
 	glm::vec3 x = glm::cross(z, glm::vec3(0.0f, 1.0f, 0.0f));
 	if (glm::length(x) < 10E-4) {
 		// colinear
 		x = glm::vec3(1.0f, 0.0f, 0.0f);
 	}
-	glm::vec3 y = glm::normalize(glm::cross(x, z));
+	glm::vec3 y = glm::normalize(glm::cross(z, x));
 	glm::mat3 light_space(x, y, z); // a left-handed coordinate system
-
-	Frustum f_whole;
-	glm::mat4 proj_inv = glm::inverse(camera.proj);
-	glm::mat4 view_inv = glm::inverse(camera.view);
 	glm::mat3 light_space_inv = glm::transpose(light_space);
-	f_whole[0] = ndc_to_world(glm::vec4(-1.0f, -1.0f, 0.0f, 1.0f), proj_inv, view_inv);
-	f_whole[1] = ndc_to_world(glm::vec4(-1.0f,  1.0f, 0.0f, 1.0f), proj_inv, view_inv);
-	f_whole[2] = ndc_to_world(glm::vec4( 1.0f,  1.0f, 0.0f, 1.0f), proj_inv, view_inv);
-	f_whole[3] = ndc_to_world(glm::vec4( 1.0f, -1.0f, 0.0f, 1.0f), proj_inv, view_inv);
-	f_whole[4] = ndc_to_world(glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f), proj_inv, view_inv);
-	f_whole[5] = ndc_to_world(glm::vec4(-1.0f,  1.0f, 1.0f, 1.0f), proj_inv, view_inv);
-	f_whole[6] = ndc_to_world(glm::vec4( 1.0f,  1.0f, 1.0f, 1.0f), proj_inv, view_inv);
-	f_whole[7] = ndc_to_world(glm::vec4( 1.0f, -1.0f, 1.0f, 1.0f), proj_inv, view_inv);
+
+	FrustumUtils::Frustum f_whole = FrustumUtils::view_frustum_vertices(glm::inverse(camera.proj), glm::inverse(camera.view));
 
 	std::vector<std::pair<float, float>> partitions = split(camera.near, camera.far, n_cascades);
 
@@ -106,7 +90,7 @@ std::vector<CSM::CascadeContext> CSM::csm_ortho_projections(
 		float start_norm = (partitions[i].first - camera.near) / (camera.far - camera.near);
 		float end_norm = (partitions[i].second - camera.near) / (camera.far - camera.near);
 
-		Frustum f_part;
+		FrustumUtils::Frustum f_part;
 		f_part[0] = glm::mix(f_whole[0], f_whole[4], start_norm);
 		f_part[1] = glm::mix(f_whole[1], f_whole[5], start_norm);  
 		f_part[2] = glm::mix(f_whole[2], f_whole[6], start_norm);
@@ -120,7 +104,8 @@ std::vector<CSM::CascadeContext> CSM::csm_ortho_projections(
 		float hw = square_bound.half_width;
 
 		// TODO: Ideally near/far plane should be determined by passing the AABB of the entire scene.
-		glm::mat4 ortho = glm::orthoLH_ZO(-hw, hw, -hw, hw, -6.0f * hw, 6.0f * hw);
+		glm::mat4 ortho = glm::orthoRH_ZO(-hw, hw, -hw, hw, -6.0f * hw, 6.0f * hw);
+		ortho[1][1] *= -1.0f;
 		glm::mat4 light_view(1.0f);
 		light_view = light_space_inv;
 		light_view[3] = glm::vec4(-square_bound.center, 1.0f);

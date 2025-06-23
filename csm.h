@@ -2,6 +2,7 @@
 
 #include "glm/glm.hpp"
 #include "camera.h"
+#include "math_common.h"
 #include <array>
 #include <vector>
 
@@ -20,17 +21,14 @@ public:
 		uint32_t resolution,
 		float blend_overlap);
 
+
 private: 
 	static std::vector<std::pair<float, float>> split(float near, float far, uint32_t n_partitions);
-
-	static glm::vec3 ndc_to_world(glm::vec3 ndc, glm::mat4 proj_inv, glm::mat4 view_inv);
-
-	typedef std::array<glm::vec3, 8> Frustum;
 
 	struct SquareBound {
 		glm::vec3 center;
 		float half_width;
 	};
 
-	static SquareBound bound_frustum(glm::mat3 light_space_inv, uint32_t resolution, const Frustum& frustum);
+	static SquareBound bound_frustum(glm::mat3 light_space_inv, uint32_t resolution, const FrustumUtils::Frustum& frustum);
 };

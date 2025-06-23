@@ -6,7 +6,8 @@
 #include <iostream>
 
 BindlessDataManager::BindlessDataManager(VkPhysicalDevice physical_device,
-	const std::string& shader_path,
+	const std::string& geometry_shader_path,
+	const std::string& mesh_preprocessor_path,
 	uint32_t n_objects,
 	uint32_t n_materials,
 	uint32_t n_images,
@@ -34,8 +35,10 @@ BindlessDataManager::BindlessDataManager(VkPhysicalDevice physical_device,
 	_n_images = n_images;
 	_n_samplers = n_samplers;
 
-	build_all_pipelines(shader_path);
+	build_all_pipelines(geometry_shader_path);
 	build_descriptor_sets();
+
+	_mesh_preprocessor.reset(new MeshPreprocessor(mesh_preprocessor_path));
 }
 
 BindlessDataManager::~BindlessDataManager() {
@@ -52,121 +55,82 @@ BindlessDataManager::~BindlessDataManager() {
 	}
 }
 
-void BindlessDataManager::build_all_pipelines(const std::string& shader_path) {
-	{
-		std::map<uint32_t, uint32_t> vs_indexing_limits = {
-			{otcv::pack(DescriptorSetRate::PerObject, 0), _n_objects}
-		};
-		std::map<uint32_t, uint32_t> fs_indexing_limits = {
-			{otcv::pack(DescriptorSetRate::PerMaterial, 0), _n_materials},
-			{otcv::pack(DescriptorSetRate::PerMaterial, 1), _n_images},
-			{otcv::pack(DescriptorSetRate::PerMaterial, 2), _n_samplers}
-		};
-		std::map<std::string, otcv::ShaderLoadHint> file_hints = {
-			{"geometry.vert", {otcv::ShaderLoadHint::Hint::DescriptorIndexing, &vs_indexing_limits}},
-			{"geometry.frag", {otcv::ShaderLoadHint::Hint::DescriptorIndexing, &fs_indexing_limits}}
-		};
-		_shader_blob = otcv::load_shaders_from_dir(shader_path, file_hints);
+void BindlessDataManager::build_all_pipelines(const std::string& geometry_shader_path) {
+	std::map<uint32_t, uint32_t> vs_indexing_limits = {
+		{otcv::pack(DescriptorSetRate::PerObject, 0), _n_objects}
+	};
+	std::map<uint32_t, uint32_t> fs_indexing_limits = {
+		{otcv::pack(DescriptorSetRate::PerMaterial, 0), _n_materials},
+		{otcv::pack(DescriptorSetRate::PerMaterial, 1), _n_images},
+		{otcv::pack(DescriptorSetRate::PerMaterial, 2), _n_samplers}
+	};
+	std::map<std::string, otcv::ShaderLoadHint> file_hints = {
+		{"geometry.vert", {otcv::ShaderLoadHint::Hint::DescriptorIndexing, &vs_indexing_limits}},
+		{"geometry.frag", {otcv::ShaderLoadHint::Hint::DescriptorIndexing, &fs_indexing_limits}}
+	};
+	_geometry_shader_blob = otcv::load_shaders_from_dir(geometry_shader_path, file_hints);
 
-		// geometry pass, culled
+	// geometry pass, culled
+	{
+		otcv::GraphicsPipelineBuilder builder;
+		builder.pipline_rendering()
+			.add_color_attachment_format(VK_FORMAT_R8G8B8A8_SRGB)
+			.add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT)
+			.add_color_attachment_format(VK_FORMAT_R8G8B8A8_UNORM)
+			.depth_stencil_attachment_format(VK_FORMAT_D24_UNORM_S8_UINT)
+			.end();
+		builder
+			.shader_vertex(_geometry_shader_blob["geometry.vert"])
+			.shader_fragment(_geometry_shader_blob["geometry.frag"]);
+		otcv::VertexBufferBuilder vbb;
+		vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
+			.add_binding().add_attribute(1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
+			.add_binding().add_attribute(2, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2))
+			.add_binding().add_attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(glm::vec4));
+		builder.vertex_state(vbb);
+		builder.depth_test().cull_back_face();
+		builder
+			.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
+			.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
+		_pipeline_bins[PipelineVariant::BackFaceCulled] = new otcv::GraphicsPipeline(builder);
+	}
+
+	// geometry pass, double-sided
+	{
+		otcv::GraphicsPipelineBuilder builder;
+		builder.pipline_rendering()
+			.add_color_attachment_format(VK_FORMAT_R8G8B8A8_SRGB)
+			.add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT)
+			.add_color_attachment_format(VK_FORMAT_R8G8B8A8_UNORM)
+			.depth_stencil_attachment_format(VK_FORMAT_D24_UNORM_S8_UINT)
+			.end();
+		builder
+			.shader_vertex(_geometry_shader_blob["geometry.vert"])
+			.shader_fragment(_geometry_shader_blob["geometry.frag"]);
 		{
-			otcv::GraphicsPipelineBuilder builder;
-			builder.pipline_rendering()
-				.add_color_attachment_format(VK_FORMAT_R8G8B8A8_SRGB)
-				.add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT)
-				.add_color_attachment_format(VK_FORMAT_R8G8B8A8_UNORM)
-				.depth_stencil_attachment_format(VK_FORMAT_D24_UNORM_S8_UINT)
-				.end();
-			builder
-				.shader_vertex(_shader_blob["geometry.vert"])
-				.shader_fragment(_shader_blob["geometry.frag"]);
 			otcv::VertexBufferBuilder vbb;
 			vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
 				.add_binding().add_attribute(1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
 				.add_binding().add_attribute(2, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2))
 				.add_binding().add_attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(glm::vec4));
 			builder.vertex_state(vbb);
-			builder.depth_test().cull_back_face();
-			builder
-				.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
-				.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
-			_pipeline_bins[PipelineVariant::BackFaceCulled] = new otcv::GraphicsPipeline(builder);
 		}
-
-		// geometry pass, double-sided
-		{
-			otcv::GraphicsPipelineBuilder builder;
-			builder.pipline_rendering()
-				.add_color_attachment_format(VK_FORMAT_R8G8B8A8_SRGB)
-				.add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT)
-				.add_color_attachment_format(VK_FORMAT_R8G8B8A8_UNORM)
-				.depth_stencil_attachment_format(VK_FORMAT_D24_UNORM_S8_UINT)
-				.end();
-			builder
-				.shader_vertex(_shader_blob["geometry.vert"])
-				.shader_fragment(_shader_blob["geometry.frag"]);
-			{
-				otcv::VertexBufferBuilder vbb;
-				vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
-					.add_binding().add_attribute(1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
-					.add_binding().add_attribute(2, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2))
-					.add_binding().add_attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(glm::vec4));
-				builder.vertex_state(vbb);
-			}
-			builder.depth_test().cull_back_face();
-			builder
-				.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
-				.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
-			_pipeline_bins[PipelineVariant::DoubleSided] = new otcv::GraphicsPipeline(builder);
-		}
-
-		// lighting pass, pbr
-		// {
-		// 	otcv::GraphicsPipelineBuilder builder;
-		// 	builder.pipline_rendering()
-		// 		.add_color_attachment_format(VK_FORMAT_R16G16B16A16_SFLOAT) // HDR
-		// 		.end();
-		// 	builder
-		// 		.shader_vertex(_shader_blob["screen_quad.vert"])
-		// 		.shader_fragment(_shader_blob["pbr.frag"]);
-		// 	otcv::VertexBufferBuilder vbb;
-		// 	vbb.add_binding()
-		// 		.add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3))
-		// 		.add_attribute(0, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2));
-		// 	builder.vertex_state(vbb);
-		// 
-		// 	builder
-		// 		.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
-		// 		.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
-		// 
-		// 	/// TODO: depth test to accomodate mock depth attachment
-		// 	// pipeline_builder.depth_test();
-		// 
-		// 	_pipeline_bins[RenderPassType::Lighting][PipelineVariant::PBR] = new otcv::GraphicsPipeline(builder);
-		// }
+		builder.depth_test().cull_back_face();
+		builder
+			.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
+			.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
+		_pipeline_bins[PipelineVariant::DoubleSided] = new otcv::GraphicsPipeline(builder);
 	}
+
 }
 
 
 void BindlessDataManager::build_descriptor_sets() {
-	// descriptor pool and descriptors
-	{
-		otcv::DescriptorPoolBuilder pool_builder;
-		pool_builder.bindless()
-			.descriptor_type_capacity(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, _n_images)
-			.descriptor_type_capacity(VK_DESCRIPTOR_TYPE_SAMPLER, _n_samplers)
-			.descriptor_type_capacity(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, _n_materials + _n_objects)
-			.descriptor_set_capacity(1);
-		_bindless_desc_pool.reset(new NaiveExpandableDescriptorPool);
-
-		// TODO: allocate descriptor sets
-		auto oom_cb = []() {
-			assert(false);
-		};
-		// grab any variant of geometry pipeline. descriptor set layouts should be identical
-		_bindless_object_desc_set = _bindless_desc_pool->allocate(_pipeline_bins.begin()->second->desc_set_layouts[DescriptorSetRate::PerObject]);
-		_bindless_material_desc_set = _bindless_desc_pool->allocate(_pipeline_bins.begin()->second->desc_set_layouts[DescriptorSetRate::PerMaterial]);
-	}
+	// bindless pool and descriptor
+	_bindless_desc_pool.reset(new NaiveExpandableDescriptorPool);
+	// grab any variant of geometry pipeline. descriptor set layouts should be identical
+	_bindless_object_desc_set = _bindless_desc_pool->allocate(_pipeline_bins.begin()->second->desc_set_layouts[DescriptorSetRate::PerObject]);
+	_bindless_material_desc_set = _bindless_desc_pool->allocate(_pipeline_bins.begin()->second->desc_set_layouts[DescriptorSetRate::PerMaterial]);
 }
 
 bool map_sampler_config(SamplerConfig config, otcv::SamplerBuilder& builder) {
@@ -477,6 +441,7 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 
 	// build vertex buffer
 	std::vector<int> obj_vertex_offsets;
+	std::vector<uint32_t> obj_vertex_counts;
 	size_t n_vertices_total = 0;
 	for (const ObjectRef& obj_ref : graph_refs) {
 		std::shared_ptr<MeshData> mesh = graph[obj_ref.node_id].renderables[obj_ref.renderable_id].mesh;
@@ -487,6 +452,7 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 		assert(mesh->positions.size() == mesh->tangents.size() || mesh->tangents.empty());
 
 		obj_vertex_offsets.push_back(n_vertices_total);
+		obj_vertex_counts.push_back(mesh->positions.size());
 		n_vertices_total += mesh->positions.size();
 
 		// should not overflow
@@ -535,9 +501,9 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 			otcv::BufferBuilder b_builder;
 			b_builder
 				.size(positions.size() * sizeof(glm::vec3))
-				.usage(VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+				.usage(VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) // to generate AABB
 				.host_access(otcv::BufferBuilder::Access::Invisible);
-			vb_builder.add_binding(b_builder, positions.data());
+			vb_builder.add_binding(b_builder);
 			vb_builder.add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3));
 		}
 		{
@@ -547,7 +513,7 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 				.size(normals.size() * sizeof(glm::vec3))
 				.usage(VK_BUFFER_USAGE_TRANSFER_DST_BIT)
 				.host_access(otcv::BufferBuilder::Access::Invisible);
-			vb_builder.add_binding(b_builder, normals.data());
+			vb_builder.add_binding(b_builder);
 			vb_builder.add_attribute(1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3));
 		}
 		{
@@ -557,21 +523,50 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 				.size(uv0.size() * sizeof(glm::vec2))
 				.usage(VK_BUFFER_USAGE_TRANSFER_DST_BIT)
 				.host_access(otcv::BufferBuilder::Access::Invisible);
-			vb_builder.add_binding(b_builder, uv0.data());
+			vb_builder.add_binding(b_builder);
 			vb_builder.add_attribute(2, VK_FORMAT_R32G32_SFLOAT, sizeof(glm::vec2));
 		}
-		if (!tangents.empty()) {
+		{
 			otcv::BufferBuilder b_builder;
 			b_builder
 				.size(tangents.size() * sizeof(glm::vec4))
 				.usage(VK_BUFFER_USAGE_TRANSFER_DST_BIT)
 				.host_access(otcv::BufferBuilder::Access::Invisible);
-			vb_builder.add_binding(b_builder, tangents.data());
+			vb_builder.add_binding(b_builder);
 			vb_builder.add_attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(glm::vec4));
 		}
-		_vb = new otcv::VertexBuffer(vb_builder, otcv::VertexBuffer::BufferDataUpload::AsyncGPUBarrier);
+		_vb = new otcv::VertexBuffer(vb_builder);
+		_vb->buffers[0]->populate_async(positions.data(), otcv::Buffer::SyncType::GPUBarrier, otcv::ResourceState::ComputeSSBORead, otcv::ResourceState::Created);
+		_vb->buffers[1]->populate_async(normals.data(), otcv::Buffer::SyncType::GPUBarrier, otcv::ResourceState::VertexRead, otcv::ResourceState::Created);
+		_vb->buffers[2]->populate_async(uv0.data(), otcv::Buffer::SyncType::GPUBarrier, otcv::ResourceState::VertexRead, otcv::ResourceState::Created);
+		_vb->buffers[3]->populate_async(tangents.data(), otcv::Buffer::SyncType::GPUBarrier, otcv::ResourceState::VertexRead, otcv::ResourceState::Created);
 	}
-	
+
+	// test: print out CPU aabb 
+	//for (uint32_t i = 0; i < _n_objects; ++i) {
+	//	glm::vec3 min(std::numeric_limits<float>::max());
+	//	glm::vec3 max(std::numeric_limits<float>::lowest());
+	//	uint32_t vertex_count = obj_vertex_counts[i];
+	//	uint32_t vertex_offset = obj_vertex_offsets[i];
+	//	for (uint32_t v = 0; v < vertex_count; ++v) {
+	//		min = glm::min(positions[v + vertex_offset], min);
+	//		max = glm::max(positions[v + vertex_offset], max);
+	//	}
+	//	std::cout << i <<  " min = " << min.x << ", " << min.y << ", " << min.z << "\t";
+	//	std::cout << "max = " << max.x << ", " << max.y << ", " << max.z << std::endl;
+	//}
+
+	// generate aabbs
+	std::vector<uint32_t> obj_vertex_offsets_uint;
+	obj_vertex_offsets_uint.insert(obj_vertex_offsets_uint.begin(), obj_vertex_offsets.begin(), obj_vertex_offsets.end());
+	_mesh_preprocessor->generate_aabb(
+		_vb->buffers[0],
+		obj_vertex_offsets_uint,
+		obj_vertex_counts,
+		otcv::ResourceState::ComputeSSBORead,
+		otcv::ResourceState::VertexRead,
+		otcv::ResourceState::ComputeSSBORead);
+
 	// build object ubos
 	Std140AlignmentType ObjectUBO;
 	ObjectUBO.add(Std140AlignmentType::InlineType::Mat4, "model");
@@ -597,4 +592,5 @@ void BindlessDataManager::set_objects(const SceneGraph& graph, const SceneGraphF
 		segment.vertex_start = obj_vertex_offsets[i];
 		_object_data_segment.push_back(segment);
 	}
+
 }

@@ -41,7 +41,6 @@ PerspectiveCamera cam(
     50.0f,
     glm::radians(60.0f),
     (float)window_width / (float)window_height);
-    
 
 class Application {
 public:
@@ -331,6 +330,7 @@ public:
         _bindless_data.reset(new BindlessDataManager(
             _physical_device,
             "./spirv/geometry_pass_bindless/",
+            "./spirv/mesh_preprocess",
             _scene_refs.size(),
             _material_res.materials.size(),
             _material_res.images.size(),
@@ -394,6 +394,8 @@ public:
         cmd_buf->cmd_bind_index_buffer(_bindless_data->_ib, VK_INDEX_TYPE_UINT16);
         
         for (uint32_t pipeline_variant = 0; pipeline_variant < (uint32_t)PipelineVariant::All; ++pipeline_variant) {
+            assert(_bindless_data->_pipeline_bins.find((PipelineVariant)pipeline_variant) != _bindless_data->_pipeline_bins.end());
+
             otcv::GraphicsPipeline* pipeline = _bindless_data->_pipeline_bins[(PipelineVariant)pipeline_variant];
             cmd_buf->cmd_bind_graphics_pipeline(pipeline);
         
@@ -542,12 +544,14 @@ public:
         _current_frame = (_current_frame + 1) % _frame_ctxs.size();
     }
 
+
+
     void update_frame_ubos(uint32_t frame_id) {
         // g-pass
         {
             glm::mat4 proj = cam.update_proj();
             glm::mat4 view = cam.update_view();
-            _culling->update(glm::inverse(proj), glm::inverse(view), frame_id);
+            _culling->update(proj, view, frame_id);
 
             glm::mat4 proj_view = proj * view;
             _frame_ctxs[frame_id].frame_ubos[RenderPassType::Geometry]->set(StaticUBOAccess()["projectView"], &proj_view);

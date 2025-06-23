@@ -1,3 +1,4 @@
+#include "math_common.h"
 #include "scene_culling.h"
 
 SceneCulling::SceneCulling(
@@ -14,8 +15,7 @@ SceneCulling::SceneCulling(
 	_frame_ctxs.resize(_in_flight_frames);
 	for (FrameContext& ctx : _frame_ctxs) {
 		Std140AlignmentType UBO;
-		UBO.add(Std140AlignmentType::InlineType::Mat4, "projectInv");
-		UBO.add(Std140AlignmentType::InlineType::Mat4, "viewInv");
+		UBO.add(Std140AlignmentType::InlineType::Vec4, "frustum_faces", 6);
 		ctx._ubo.reset(new StaticUBO(UBO));
 		ctx._desc_set = _desc_pool->allocate(_pipeline->desc_set_layouts[DescriptorSetRate::PerFrame]);
 		ctx._desc_set->bind_buffer(0, ctx._ubo->_buf);
@@ -33,17 +33,15 @@ SceneCulling::ObjectBufferContext SceneCulling::create_object_buffer_context(
 
 	ObjectBufferContext obj_buf_ctx;
 
-	Std430AlignmentType AABB;
-	AABB.add(Std430AlignmentType::InlineType::Vec3, "min");
-	AABB.add(Std430AlignmentType::InlineType::Vec3, "max");
+	obj_buf_ctx.ssbo_aabbs = bindless_data->_mesh_preprocessor->AABB_SSBO();
+
 	Std430AlignmentType ObjectData;
 	ObjectData.add(Std430AlignmentType::InlineType::Mat4, "model");
-	ObjectData.add(AABB, "aabb");
 	ObjectData.add(Std430AlignmentType::InlineType::Uint, "indexCount");
 	ObjectData.add(Std430AlignmentType::InlineType::Uint, "firstIndex");
 	ObjectData.add(Std430AlignmentType::InlineType::Int, "vertexOffset");
 	ObjectData.add(Std430AlignmentType::InlineType::Uint, "pipelineVariant");
-	obj_buf_ctx.ssbo.reset(new SSBO(ObjectData, _n_obj));
+	obj_buf_ctx.ssbo_objects.reset(new SSBO(ObjectData, _n_obj));
 
 	std::vector<SSBO::WriteContext> ssbo_writes(_n_obj);
 	for (uint32_t i = 0; i < _n_obj; ++i) {
@@ -51,19 +49,17 @@ SceneCulling::ObjectBufferContext SceneCulling::create_object_buffer_context(
 		std::shared_ptr<MeshData> mesh = scene_node.renderables[scene_refs[i].renderable_id].mesh;
 		ssbo_writes[i].id = i;
 		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["model"], &scene_node.world_transform });
-		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["aabb"]["min"], &mesh->aabb.min });
-		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["aabb"]["max"], &mesh->aabb.max });
-
 		BindlessDataManager::ObjectDataSegment& segment = bindless_data->_object_data_segment[i];
 		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["indexCount"], &segment.index_count });
 		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["firstIndex"], &segment.index_start });
 		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["vertexOffset"], &segment.vertex_start });
 		ssbo_writes[i].access_ctxs.push_back({ SSBOAccess()["pipelineVariant"], &scene_refs[i].pipeline_variant });
 	}
-	obj_buf_ctx.ssbo->write(ssbo_writes);
+	obj_buf_ctx.ssbo_objects->write(ssbo_writes);
 
 	obj_buf_ctx.desc_set = _desc_pool->allocate(_pipeline->desc_set_layouts[DescriptorSetRate::ComputeRead]);
-	obj_buf_ctx.desc_set->bind_buffer(0, obj_buf_ctx.ssbo->_buf);
+	obj_buf_ctx.desc_set->bind_buffer(0, obj_buf_ctx.ssbo_objects->_buf);
+	obj_buf_ctx.desc_set->bind_buffer(1, obj_buf_ctx.ssbo_aabbs->_buf);
 
 	return obj_buf_ctx;
 }
@@ -103,10 +99,24 @@ SceneCulling::IndirectCommandContext SceneCulling::create_indirect_command_conte
 	return indirect_cmd_ctx;
 }
 
-void SceneCulling::update(const glm::mat4& proj_inv, const glm::mat4& view_inv, uint32_t frame_id) {
+void SceneCulling::update(const glm::mat4& proj, const glm::mat4& view, uint32_t frame_id) {
 	// update frame ubo
-	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["projectInv"], &proj_inv);
-	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["viewInv"], &view_inv);
+	// TODO: update frustum planes
+
+	FrustumUtils::Frustum f = FrustumUtils::view_frustum_vertices(glm::inverse(proj), glm::inverse(view));
+	glm::vec4 left = FrustumUtils::plane(f[0], f[4], f[5]);
+	glm::vec4 right = FrustumUtils::plane(f[2], f[6], f[7]);
+	glm::vec4 top = FrustumUtils::plane(f[3], f[7], f[4]);
+	glm::vec4 bottom = FrustumUtils::plane(f[1], f[5], f[6]);
+	glm::vec4 far = FrustumUtils::plane(f[5], f[4], f[7]);
+	glm::vec4 near = FrustumUtils::plane(f[0], f[1], f[2]);
+
+	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["frustum_faces"][0], &left);
+	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["frustum_faces"][1], &right);
+	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["frustum_faces"][2], &top);
+	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["frustum_faces"][3], &bottom);
+	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["frustum_faces"][4], &far);
+	_frame_ctxs[frame_id]._ubo->set(StaticUBOAccess()["frustum_faces"][5], &near);
 }
 
 void SceneCulling::commands(

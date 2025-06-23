@@ -1,14 +1,8 @@
 #version 450
 layout(local_size_x = 64) in;
 
-struct AABB {
-    vec3 min;
-    vec3 max;
-};
-
 struct ObjectData {
     mat4 model;
-    AABB aabb;
     uint indexCount;
     uint firstIndex;
     int  vertexOffset;
@@ -18,12 +12,20 @@ struct ObjectData {
 };
 
 layout(std140, set = 0, binding = 0) uniform UBO {
-    mat4 projectInv;
-    mat4 viewInv;
+    vec4 frustum_faces[6]; // in world space
 } Ubo;
 
 layout(std430, set = 1, binding = 0) readonly buffer ObjectBuffer {
     ObjectData objects[];
+};
+
+struct AABB {
+    vec3 min;
+    vec3 max;
+};
+
+layout(std430, set = 1, binding = 1) readonly buffer AABBBuffer {
+    AABB aabbs[];
 };
 
 struct DrawCommand {
@@ -49,8 +51,45 @@ layout(std430, set = 2, binding = 1) writeonly buffer DrawCountBuffer {
     DrawCount counts[];
 };
 
-bool is_visible(uint id) {
-    // TODO: frustum culling
+struct OBB {
+    vec4 origin;
+    vec3 x;
+    vec3 y;
+    vec3 z;
+    vec3 half_dim;
+};
+
+OBB AABB_to_OBB(AABB aabb, mat4 transform) {
+    OBB obb;
+    obb.origin = transform * vec4((aabb.min + aabb.max) * 0.5f, 1.0f);
+    mat3 transform_linear = mat3(transform);
+    obb.x = transform_linear[0]; // transform_linear * vec3(1.0f, 0.0f, 0.0f);
+    obb.y = transform_linear[1]; // transform_linear * vec3(0.0f, 1.0f, 0.0f);
+    obb.z = transform_linear[2]; // transform_linear * vec3(0.0f, 0.0f, 1.0f);
+    obb.half_dim = vec3(aabb.max - aabb.min) * 0.5f; 
+    return obb;
+}
+
+float signed_distance_to_plane(vec3 p, vec4 plane) {
+    return dot(p, plane.xyz) + plane.w;
+}
+
+float projected_radius(OBB obb, vec4 plane) {
+    vec3 n = plane.xyz;
+    return obb.half_dim.x * abs(dot(obb.x, n)) + obb.half_dim.y * abs(dot(obb.y, n)) + obb.half_dim.z * abs(dot(obb.z, n));
+}
+
+bool is_visible(uint objId) {
+    OBB obb = AABB_to_OBB(aabbs[objId], objects[objId].model);
+    
+    for (uint i = 0; i < 6; ++i) {
+        float d = signed_distance_to_plane(obb.origin.xyz, Ubo.frustum_faces[i]);
+        float r = projected_radius(obb, Ubo.frustum_faces[i]);
+        if (d > r) {
+            return false;
+        }
+    }
+
     return true;
 }
 

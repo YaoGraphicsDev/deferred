@@ -20,22 +20,41 @@ ShadowManager::ShadowManager(
 	};
 	_shader_blob = std::move(otcv::load_shaders_from_dir(shadow_shader_path, file_hints));
 
-	otcv::GraphicsPipelineBuilder pipeline_builder;
-	pipeline_builder.pipline_rendering()
-		.depth_stencil_attachment_format(shadowmap->builder._image_info.format)
-		.end()
-		.shader_vertex(_shader_blob["cascaded_shadow.vert"])
-		.cull_back_face(VK_FRONT_FACE_CLOCKWISE)
-		.depth_test();
 	{
-		otcv::VertexBufferBuilder vbb;
-		vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3));
-		pipeline_builder.vertex_state(vbb); // bind position attribute only
+		otcv::GraphicsPipelineBuilder pipeline_builder;
+		pipeline_builder.pipline_rendering()
+			.depth_stencil_attachment_format(shadowmap->builder._image_info.format)
+			.end()
+			.shader_vertex(_shader_blob["cascaded_shadow.vert"])
+			.cull_back_face(VK_FRONT_FACE_CLOCKWISE)
+			.depth_test();
+		{
+			otcv::VertexBufferBuilder vbb;
+			vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3));
+			pipeline_builder.vertex_state(vbb); // bind position attribute only
+		}
+		pipeline_builder
+			.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
+			.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
+		_pipeline_bins[PipelineVariant::BackFaceCulled] = pipeline_builder.build();
 	}
-	pipeline_builder
-		.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
-		.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
-	_pipeline = pipeline_builder.build();
+	{
+		otcv::GraphicsPipelineBuilder pipeline_builder;
+		pipeline_builder.pipline_rendering()
+			.depth_stencil_attachment_format(shadowmap->builder._image_info.format)
+			.end()
+			.shader_vertex(_shader_blob["cascaded_shadow.vert"])
+			.depth_test();
+		{
+			otcv::VertexBufferBuilder vbb;
+			vbb.add_binding().add_attribute(0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(glm::vec3));
+			pipeline_builder.vertex_state(vbb); // bind position attribute only
+		}
+		pipeline_builder
+			.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
+			.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
+		_pipeline_bins[PipelineVariant::DoubleSided] = pipeline_builder.build();
+	}
 
 	_desc_pool.reset(new NaiveExpandableDescriptorPool());
 
@@ -44,7 +63,7 @@ ShadowManager::ShadowManager(
 	for (FrameContext& frame : _frame_ctxs) {
 		frame.resize(n_cascades); // number of cascades
 		for (CascadeContext& cascade : frame) {
-			cascade.desc_set = _desc_pool->allocate(_pipeline->desc_set_layouts[DescriptorSetRate::PerFrame]);
+			cascade.desc_set = _desc_pool->allocate(_pipeline_bins.begin()->second->desc_set_layouts[DescriptorSetRate::PerFrame]);
 
 			Std140AlignmentType FrameUBO;
 			FrameUBO.add(Std140AlignmentType::InlineType::Mat4, "projectView");
@@ -88,7 +107,7 @@ std::vector<CSM::CascadeContext> ShadowManager::update(glm::vec3 light_dir, Pers
 		frame_ctx[cascade].ubo->set(acc, &(light_pv));
 
 		// update culling
-		_scene_cullings[cascade]->update(glm::inverse(cascade_ctxs[cascade].light_proj), glm::inverse(cascade_ctxs[cascade].light_view), frame_id);
+		_scene_cullings[cascade]->update(cascade_ctxs[cascade].light_proj, cascade_ctxs[cascade].light_view, frame_id);
 	}
 	return cascade_ctxs;
 }
@@ -116,17 +135,22 @@ void ShadowManager::commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
 		cmd_buf->cmd_set_viewport(width, height);
 		cmd_buf->cmd_set_scissor(width, height);
 
-		cmd_buf->cmd_bind_descriptor_set(_pipeline, _frame_ctxs[frame_id][cascade].desc_set, DescriptorSetRate::PerFrame);
-		cmd_buf->cmd_bind_descriptor_set(_pipeline, _bindless_data->_bindless_object_desc_set, DescriptorSetRate::PerObject);
 		cmd_buf->cmd_bind_vertex_buffer(_bindless_data->_vb);
 		cmd_buf->cmd_bind_index_buffer(_bindless_data->_ib, VK_INDEX_TYPE_UINT16);
-
-		cmd_buf->cmd_bind_graphics_pipeline(_pipeline);
 
 		// TODO: issuing a draw call for each pipeline variant is not really necessary 
 		// as shadow pipeline do not differentiate materials
 		// this can be solve by writing another version of frustum_cull.comp shader that puts all indirect commands in one place
 		for (uint32_t pipeline_variant = 0; pipeline_variant < (uint32_t)PipelineVariant::All; ++pipeline_variant) {
+			assert(_pipeline_bins.find((PipelineVariant)pipeline_variant) != _pipeline_bins.end());
+
+			otcv::GraphicsPipeline* pipeline = _pipeline_bins[(PipelineVariant)pipeline_variant];
+			cmd_buf->cmd_bind_graphics_pipeline(pipeline);
+
+			cmd_buf->cmd_bind_descriptor_set(pipeline, _frame_ctxs[frame_id][cascade].desc_set, DescriptorSetRate::PerFrame);
+			cmd_buf->cmd_bind_descriptor_set(pipeline, _bindless_data->_bindless_object_desc_set, DescriptorSetRate::PerObject);
+
+			
 			Std430AlignmentType::Range command_range = _culling_out[cascade].ssbo_commands->range_of(pipeline_variant * _n_obj, SSBOAccess());
 			Std430AlignmentType::Range count_range = _culling_out[cascade].ssbo_draw_count->range_of(pipeline_variant, SSBOAccess());
 			cmd_buf->cmd_draw_indexed_indirect_count(

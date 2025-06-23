@@ -23,7 +23,8 @@ public:
 	// SSBOs should be kept externally and be passed back when pushing commands
 	struct ObjectBufferContext {
 		otcv::DescriptorSet* desc_set;
-		std::shared_ptr<SSBO> ssbo;
+		std::shared_ptr<SSBO> ssbo_objects;
+		std::shared_ptr<SSBO> ssbo_aabbs;
 	};
 	ObjectBufferContext create_object_buffer_context(
 		const SceneGraph& scene,
@@ -39,7 +40,7 @@ public:
 		uint32_t n_pipeline_variants,
 		std::shared_ptr<BindlessDataManager> bindless_data);
 
-	void update(const glm::mat4& proj_inv, const glm::mat4& view_inv, uint32_t frame_id);
+	void update(const glm::mat4& proj, const glm::mat4& view, uint32_t frame_id);
 
 	void commands(
 		otcv::CommandBuffer* cmd_buf,
