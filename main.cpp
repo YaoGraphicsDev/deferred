@@ -29,7 +29,7 @@ const int cascaded_shadowmap_size = 2048;
 const int cascaded_shadowmap_layers = 3;
 const int jitter_tile_size = 8;
 const int jitter_strata_per_dim = 8;
-const float jitter_radius = 0.05f;
+const float jitter_radius = 0.02f;
 const float cascade_blend_depth = 1.0f;
 
 
