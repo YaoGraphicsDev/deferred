@@ -3,6 +3,7 @@
 
 #include "input_handler.h"
 #include "arcball.h"
+#include "free_roam.h"
 
 #include "gltf_parser_bindless.h"
 #include "render_global_types.h"
@@ -64,26 +65,31 @@ public:
         cleanup();
     }
 
-    void left_press_callback(double x, double y) {
-        _arcball.begin(cam.eye, cam.center, cam.up, glm::ivec2(x, y), glm::ivec2(window_width, window_height));
-    }
 
-    void left_release_callback(double x, double y) {
-        _arcball.end();
-    }
+    //void left_press_callback(double x, double y) {
+    //    _arcball.begin(cam.eye, cam.center, cam.up, glm::ivec2(x, y), glm::ivec2(window_width, window_height));
+    //}
 
-    void left_drag_callback(double x, double y) {
-        _arcball.progress(glm::ivec2(x, y), cam.eye, cam.up);
-    }
+    //void left_release_callback(double x, double y) {
+    //    _arcball.end();
+    //}
 
-    void wheel_scroll_callback(double x, double y, double offset) {
-        float scale = glm::pow(0.9f, offset);
-        cam.eye = glm::mix(cam.center, cam.eye, scale);
-    }
+    //void left_drag_callback(double x, double y) {
+    //    _arcball.progress(glm::ivec2(x, y), cam.eye, cam.up);
+    //}
 
-    bool mouse_input_filter() {
-        return !ImGui::GetIO().WantCaptureMouse;
-    }
+    //void mouse_move_callback() {
+    //}
+
+    //void wheel_scroll_callback(double x, double y, double offset) {
+    //    float scale = glm::pow(0.9f, offset);
+    //    cam.eye = glm::mix(cam.center, cam.eye, scale);
+    //}
+
+    //bool mouse_input_filter() {
+    //    return !ImGui::GetIO().WantCaptureMouse;
+    //}
+
 
     void init_window() {
         glfwInit();
@@ -91,17 +97,61 @@ public:
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         _window = glfwCreateWindow(window_width, window_height, "Deferred shading", nullptr, nullptr);
+        glfwSetWindowUserPointer(_window, this);
 
-        _input_handler = std::make_shared<InputHandler>(_window);
+        glfwSetKeyCallback(_window, [](GLFWwindow* w, int key, int scancode, int action, int mods) {
+            Application* app = static_cast<Application*>(glfwGetWindowUserPointer(w));
+            if (!app) {
+                return;
+            }
 
-        _input_handler->set_mouse_input_filter(std::bind(&Application::mouse_input_filter, this));
-        _input_handler->set_mouse_drag_handler(std::bind(&Application::left_drag_callback, this, std::placeholders::_1, std::placeholders::_2),
-            InputHandler::MouseButton::Left);
-        _input_handler->set_mouse_press_handler(std::bind(&Application::left_press_callback, this, std::placeholders::_1, std::placeholders::_2),
-            InputHandler::MouseButton::Left);
-        _input_handler->set_mouse_release_handler(std::bind(&Application::left_release_callback, this, std::placeholders::_1, std::placeholders::_2),
-            InputHandler::MouseButton::Left);
-        _input_handler->set_mouse_scroll_handler(std::bind(&Application::wheel_scroll_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+            // press C to toggle free roam camera
+            if (key == GLFW_KEY_C && action == GLFW_PRESS) {
+                app->enable_free_roam = !app->enable_free_roam;
+                if (app->enable_free_roam) {
+                    // initialize free roam
+                    app->_free_roam.enter_free_roam(cam.eye, cam.center);
+                    glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                }
+                else {
+                    // exit free roam
+                    app->_free_roam.exit_free_roam();
+                    glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                }
+            }
+
+            if (app->enable_free_roam && (action == GLFW_PRESS || action == GLFW_RELEASE)) {
+                app->_free_roam.on_key(key, action);
+            }
+        });
+
+        glfwSetCursorPosCallback(_window, [](GLFWwindow* w, double x, double y)
+        {
+            Application* app = static_cast<Application*>(glfwGetWindowUserPointer(w));
+            if (!app) {
+                return;
+            }
+
+            if (app->enable_free_roam) {
+                app->_free_roam.on_mouse_move(x, y);
+            }
+        });
+
+
+        // _input_handler = std::make_shared<InputHandler>(_window);
+
+        // _input_handler->set_mouse_input_filter(std::bind(&Application::mouse_input_filter, this));
+        ////_input_handler->set_mouse_drag_handler(std::bind(&Application::left_drag_callback, this, std::placeholders::_1, std::placeholders::_2),
+        ////    InputHandler::MouseButton::Left);
+        //_input_handler->set_mouse_drag_handler(std::bind(&Application::mouse_move_callback, this),
+        //    InputHandler::MouseButton::None);
+        //_input_handler->set_mouse_press_handler(std::bind(&Application::left_press_callback, this, std::placeholders::_1, std::placeholders::_2),
+        //    InputHandler::MouseButton::Left);
+        //_input_handler->set_mouse_release_handler(std::bind(&Application::left_release_callback, this, std::placeholders::_1, std::placeholders::_2),
+        //    InputHandler::MouseButton::Left);
+        //_input_handler->set_mouse_scroll_handler(std::bind(&Application::wheel_scroll_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+        //_input_handler->set_key_press_handler(std::bind(&Application::key_press_callback, this, std::placeholders::_1));
+        //_input_handler->set_key_release_handler(std::bind(&Application::key_release_callback, this, std::placeholders::_1));
     }
 
     std::shared_ptr<StaticUBO> init_frame_ubo(RenderPassType pass) {
@@ -606,7 +656,8 @@ public:
     }
     void main_loop() {
         while (!glfwWindowShouldClose(_window)) {
-            glfwPollEvents();
+            glfwPollEvents();        
+            _free_roam.update(0.033f, cam.eye, cam.center, cam.up);
             // immediate_gui();
             draw_frame();
         }
@@ -681,8 +732,10 @@ public:
     otcv::VertexBuffer* _screen_quad;
     size_t _current_frame = 0;
 
-    std::shared_ptr<InputHandler> _input_handler;
-    Arcball _arcball;
+    // std::shared_ptr<InputHandler> _input_handler;
+    // Arcball _arcball;
+    bool enable_free_roam = false;
+    FreeRoam _free_roam;
 
     SceneGraph _scene_graph;
     SceneGraphFlatRefs _scene_refs;

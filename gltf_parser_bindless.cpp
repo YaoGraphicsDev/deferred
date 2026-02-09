@@ -24,7 +24,7 @@ std::vector<TextureBinding> g_textures;
 std::vector<std::shared_ptr<MaterialData>> g_materials;
 
 template<typename T>
-bool load_accessor(int accessor_id, std::vector<T>& buffer) {
+static bool load_accessor(int accessor_id, std::vector<T>& buffer) {
 	tg::Accessor& acc = model.accessors[accessor_id];
 	tg::BufferView& bv = model.bufferViews[acc.bufferView];
 	tg::Buffer& buf = model.buffers[bv.buffer];
@@ -54,7 +54,7 @@ bool load_accessor(int accessor_id, std::vector<T>& buffer) {
 }
 
 template<typename T>
-bool load_attribute(
+static bool load_attribute(
 	const tinygltf::Primitive& prim,
 	const std::string& name,
 	std::vector<T>& buffer,
@@ -71,7 +71,7 @@ bool load_attribute(
 	return true;
 }
 
-std::shared_ptr<ImageData> load_image(int image_id) {
+static std::shared_ptr<ImageData> load_image(int image_id) {
 	if (image_id < 0) {
 		std::cout << "image id = " << image_id << std::endl;
 		return nullptr;
@@ -89,7 +89,7 @@ std::shared_ptr<ImageData> load_image(int image_id) {
 	return i;
 }
 
-bool load_all_images() {
+static bool load_all_images() {
 	for (int image_id = 0; image_id < model.images.size(); ++image_id) {
 		std::shared_ptr<ImageData> image = load_image(image_id);
 		if (!image) {
@@ -101,7 +101,7 @@ bool load_all_images() {
 	return true;
 }
 
-void load_all_samplers() {
+static void load_all_samplers() {
 	for (tg::Sampler& gltf_sampler : model.samplers) {
 		SamplerConfig sampler_cfg;
 		sampler_cfg.mag_filter = gltf_sampler.magFilter;
@@ -113,13 +113,13 @@ void load_all_samplers() {
 	}
 }
 
-void setup_all_textures() {
+static void setup_all_textures() {
 	for (tg::Texture& gltf_texture : model.textures) {
 		g_textures.push_back({ gltf_texture.source, gltf_texture.sampler });
 	}
 }
 
-std::shared_ptr<MaterialData> load_material(int material_id) {
+static std::shared_ptr<MaterialData> load_material(int material_id) {
 	if (material_id < 0) {
 		std::cout << "material id = " << material_id << std::endl;
 		return nullptr;
@@ -161,7 +161,7 @@ std::shared_ptr<MaterialData> load_material(int material_id) {
 	return m;
 }
 
-bool load_all_materials() {
+static bool load_all_materials() {
 	for (int material_id = 0; material_id < model.materials.size(); ++material_id) {
 		std::shared_ptr<MaterialData> material = load_material(material_id);
 		if (!material) {
@@ -174,7 +174,7 @@ bool load_all_materials() {
 }
 
 // a gltf mesh primitive corresponds to a renderable
-bool load_primitive(int mesh_id, int prim_id, Renderable& renderable) {
+static bool load_primitive(int mesh_id, int prim_id, Renderable& renderable) {
 	const tg::Primitive& prim = model.meshes[mesh_id].primitives[prim_id];
 
 	// load geometry
@@ -205,11 +205,12 @@ bool load_primitive(int mesh_id, int prim_id, Renderable& renderable) {
 	return true;
 }
 
-glm::mat4 parse_matrix(const tg::Node& node) {
+static glm::mat4 parse_matrix(const tg::Node& node) {
 	glm::mat4 mat(1.0f);
 	if (!node.matrix.empty()) {
-		std::memcpy(&mat, node.translation.data(), sizeof(mat));
-		return mat;
+		for (int i = 0; i < 16; i++) {
+			reinterpret_cast<float*>(&mat)[i] = static_cast<float>(node.matrix[i]);
+		}
 	}
 
 	glm::vec3 t(0.0f);
@@ -240,7 +241,7 @@ glm::mat4 parse_matrix(const tg::Node& node) {
 	return T * R * S;
 }
 
-bool load_node(int node_id, int parent_id, SceneGraph& scene) {
+static bool load_node(int node_id, int parent_id, SceneGraph& scene) {
 	const tg::Node& node = model.nodes[node_id];
 
 	scene.emplace_back();
@@ -281,7 +282,7 @@ bool load_node(int node_id, int parent_id, SceneGraph& scene) {
 	return true;
 }
 
-bool load_gltf(const std::string& filename, SceneGraph& scene) {
+static bool load_gltf(const std::string& filename, SceneGraph& scene) {
 	bool ret = loader.LoadASCIIFromFile(&model, &err, &warn, filename);
 	if (!err.empty()) {
 		std::cout << "Error loading file " << filename << ": " << err << std::endl;
@@ -323,7 +324,7 @@ bool load_gltf(const std::string& filename, SceneGraph& scene) {
 	return true;
 }
 
-PipelineVariant find_pipeline_variant(SceneGraph& scene, uint32_t node_id, uint32_t renderable_id,  MaterialResources& mat_res) {
+static PipelineVariant find_pipeline_variant(SceneGraph& scene, uint32_t node_id, uint32_t renderable_id,  MaterialResources& mat_res) {
 	std::shared_ptr<MaterialData> mat = mat_res.materials[scene[node_id].renderables[renderable_id].material_id];
 	if (mat->double_sided) {
 		return PipelineVariant::DoubleSided;
@@ -340,6 +341,8 @@ bool load_gltf(
 
 	if (!load_gltf(filename, graph)) {
 		std::cout << "error loading gltf file " << filename << std::endl;
+		// clear g_* buffers
+		assert(false);
 		return false;
 	}
 
