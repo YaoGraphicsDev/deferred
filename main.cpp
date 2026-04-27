@@ -200,7 +200,7 @@ public:
         _device = _vulkan_context.device->vk_device;
         _swapchain = _vulkan_context.swapchain;
         for (uint32_t i = 0; i < _swapchain->images.size(); ++i) {
-            _swapchain->mock_image(i)->initialize_state(otcv::ResourceState::Present);
+            _swapchain->mock_image(i)->initialize_state(otcv::ResourceState::PresentReady);
         }
     }
     void init_render_targets() {
@@ -372,7 +372,7 @@ public:
     }
     bool load_scene() {
         bool ret = load_gltf(
-            "C:/Users/Liyao/Sources/Sponza/glTF/Sponza.gltf",
+            "C:/Users/Yao/models/Sponza/glTF/Sponza.gltf",
             _scene_graph,
             _scene_refs,
             _material_res);
@@ -518,7 +518,7 @@ public:
         FrameContext& f_ctx = _frame_ctxs[frame_id];
 
         cmd_buf->cmd_image_memory_barrier(_swapchain->mock_image(image_id),
-            otcv::ResourceState::Present, otcv::ResourceState::TransferDst);
+            otcv::ResourceState::PresentAvailableForTransferDst, otcv::ResourceState::TransferDst);
 
         otcv::ImageBlit region;
         region
@@ -534,7 +534,7 @@ public:
         // for gui overlay to draw on. Also serves as synchronization point for later gui overlay to wait on
 
         cmd_buf->cmd_image_memory_barrier(_swapchain->mock_image(image_id),
-            otcv::ResourceState::TransferDst, otcv::ResourceState::Present); // TODO: imgui in-flight support. Change the final state to ColorAttachment
+            otcv::ResourceState::TransferDst, otcv::ResourceState::PresentReady); // TODO: imgui in-flight support. Change the final state to ColorAttachment
     }
 
     void draw_frame() {

@@ -121,11 +121,18 @@ void ShadowManager::commands(otcv::CommandBuffer* cmd_buf, uint32_t frame_id) {
 		// cull frustum 
 		_scene_cullings[cascade]->commands(cmd_buf, _culling_in, _culling_out[cascade], frame_id);
 
+		VkImageSubresourceRange subrange{};
+		subrange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		subrange.baseMipLevel = 0;
+		subrange.levelCount = 1;
+		subrange.baseArrayLayer = cascade;
+		subrange.layerCount = 1;
+
 		otcv::RenderingBegin pass_begin;
 		pass_begin
 			.area(width, height)
 			.depth_stencil_attachment()
-			.image_view(_shadowmap->view_of_layers(cascade, 1))
+			.image_view(_shadowmap->view_of_subresource(subrange))
 			.image_layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 			.load_store(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE)
 			.clear_value(1.0f, 0)
