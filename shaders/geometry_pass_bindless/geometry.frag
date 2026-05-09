@@ -3,9 +3,9 @@
 #extension GL_EXT_samplerless_texture_functions : require
 
 layout(location = 0) in vec3 inWorldNormal;
-layout(location = 1) in vec2 inUV;
+layout(location = 1) in vec2 inUV;				// only one set of UV for now
 layout(location = 2) in vec4 inWorldTangent;
-layout(location = 3) in flat int inMaterialId;
+layout(location = 3) flat in int inMaterialId;
 
 layout(location = 0) out vec4 outAlbedo;
 layout(location = 1) out vec4 outNormal;
@@ -50,7 +50,7 @@ void main() {
     TextureIds texIds = mUbos[nonuniformEXT(inMaterialId)].texIds;
 	SamplerIds samplerIds = mUbos[nonuniformEXT(inMaterialId)].samplerIds;
 
-    vec4 albedo = vec4(0.0f); 
+    vec4 albedo = vec4(1.0f);
     if (texIds.baseColorId >= 0 && samplerIds.baseColorId >= 0) {
 		// vec4 color = texture(sampler2D(u_textures[i], u_sampler), uv);
         albedo = texture(sampler2D(
@@ -58,10 +58,11 @@ void main() {
 			samplers[nonuniformEXT(samplerIds.baseColorId)]),
 			inUV);
     }
+	albedo = albedo * cfg.baseColorFactor;
 	if (cfg.alphaMode == 1 && albedo.w < cfg.alphaCutoff) {
 		discard;
 	}
-	outAlbedo = albedo * cfg.baseColorFactor;
+	outAlbedo = albedo;
 
 	float metallicFactor = cfg.mrnoFactor.x;
 	float roughnessFactor = cfg.mrnoFactor.y;
@@ -94,6 +95,6 @@ void main() {
 			samplers[nonuniformEXT(samplerIds.metallicRoughnessId)]),
 			inUV) * vec4(metallicFactor, roughnessFactor, 0.0f, 0.0f);
     } else {
-		outMetallicRoughness = vec4(0.0f);
+		outMetallicRoughness = vec4(metallicFactor, roughnessFactor, 0.0f, 0.0f);
     }
 }

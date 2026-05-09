@@ -10,5 +10,7 @@ struct FrustumUtils {
 	// in world space
 	static Frustum view_frustum_vertices(glm::mat4 proj_inv, glm::mat4 view_inv);
 
+	static void bounding_sphere(const Frustum& f, glm::vec3& center, float& radius);
+
 	static glm::vec4 plane(glm::vec3 a, glm::vec3 b, glm::vec3 c);
 };

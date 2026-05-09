@@ -18,8 +18,8 @@ MeshPreprocessor::~MeshPreprocessor() {
 
 void MeshPreprocessor::generate_aabb(
 	otcv::Buffer* positions,
-	std::vector<uint32_t> vertex_offsets,
-	std::vector<uint32_t> vertex_counts,
+	const std::vector<uint32_t>& vertex_offsets,
+	const std::vector<uint32_t>& vertex_counts,
 	otcv::ResourceState position_source_state,
 	otcv::ResourceState position_target_state,
 	otcv::ResourceState aabb_buffer_target_state) {
@@ -56,7 +56,7 @@ void MeshPreprocessor::generate_aabb(
 		_cmd_buf->cmd_buffer_memory_barrier(
 			positions,
 			position_source_state,
-			position_target_state);
+			otcv::ResourceState::ComputeSSBORead);
 	}
 
 	for (uint32_t i = 0; i < n_obj; ++i) {

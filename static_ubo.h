@@ -132,8 +132,30 @@ struct SSBO {
 	Std430AlignmentType::Range range_of(uint32_t id, SSBOAccess& acc);
 
 	uint32_t _stride;
-	uint32_t _n_ubos;
+	uint32_t _n_ssbos;
 	otcv::Buffer* _buf;
 	std::vector<uint8_t> _staging_buf;
+	Std430AlignmentType _layout;
+};
+
+struct SSBOLayout {
+	SSBOLayout() {};
+
+	SSBOLayout(const Std430AlignmentType& layout, uint32_t n_ssbo);
+
+	struct WriteContext {
+		uint32_t id;
+		struct AccessContext {
+			SSBOAccess acc;
+			const void* value;
+		};
+		std::vector<AccessContext> access_ctxs;
+	};
+
+	Std430AlignmentType::Range range_of(uint32_t id, SSBOAccess& acc);
+
+	uint32_t _stride;
+	uint32_t _n_ssbos;
+	otcv::BufferBuilder _builder;
 	Std430AlignmentType _layout;
 };

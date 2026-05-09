@@ -29,8 +29,13 @@ std::vector<std::pair<float, float>> CSM::split(float near, float far, uint32_t 
 // world space frustum
 CSM::SquareBound CSM::bound_frustum(glm::mat3 light_space_inv, uint32_t resolution, const FrustumUtils::Frustum& frustum) {
 	// radius and center of bounding sphere
-	float r = glm::length(frustum[0] - frustum[6]) * 0.5f;
-	glm::vec3 c = (frustum[0] + frustum[6]) * 0.5f;
+	//float r = glm::length(frustum[0] - frustum[6]) * 0.5f;
+	//glm::vec3 c = (frustum[0] + frustum[6]) * 0.5f;
+
+	float r;
+	glm::vec3 c;
+	FrustumUtils::bounding_sphere(frustum, c, r);
+
 	c = light_space_inv * c;
 	glm::vec2 c_xy = glm::vec2(c);
 	// expand to fit snapping
@@ -42,7 +47,7 @@ CSM::SquareBound CSM::bound_frustum(glm::mat3 light_space_inv, uint32_t resoluti
 
 	SquareBound bound;
 	bound.center = glm::vec3(c_xy_snapped.x, c_xy_snapped.y, c.z);
-	bound.half_width = r;
+	bound.half_width = r + margin;
 	return bound;
 }
 
@@ -59,6 +64,9 @@ std::vector<CSM::CascadeContext> CSM::csm_ortho_projections(
 	if (glm::length(x) < 10E-4) {
 		// colinear
 		x = glm::vec3(1.0f, 0.0f, 0.0f);
+	}
+	else {
+		x = glm::normalize(x);
 	}
 	glm::vec3 y = glm::normalize(glm::cross(z, x));
 	glm::mat3 light_space(x, y, z); // a left-handed coordinate system

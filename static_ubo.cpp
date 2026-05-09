@@ -235,12 +235,12 @@ void StaticUBOArray::set(uint32_t ubo_id, StaticUBOAccess& access, const void* v
 
 SSBO::SSBO(const Std430AlignmentType& layout, uint32_t n_ssbo, VkBufferUsageFlags additional_usage) {
     _stride = round_up_to(layout._total_size, layout._max_base_alignment);
-    _n_ubos = n_ssbo;
+    _n_ssbos = n_ssbo;
 
     otcv::BufferBuilder bb;
     bb.usage(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | additional_usage)
         .host_access(otcv::BufferBuilder::Access::Invisible)
-        .size(_stride * _n_ubos);
+        .size(_stride * _n_ssbos);
     _buf = new otcv::Buffer(bb);
     _staging_buf.resize(_buf->builder._info.size);
     _layout = layout;
@@ -253,7 +253,7 @@ SSBO::~SSBO() {
 
 void SSBO::write(std::vector<WriteContext>& writes) {
     for (WriteContext& write : writes) {
-        assert(write.id < _n_ubos);
+        assert(write.id < _n_ssbos);
         for (WriteContext::AccessContext& acc_ctx : write.access_ctxs) {
             BufferObjectAccess& acc = acc_ctx.acc;
             const void* value = acc_ctx.value;
@@ -267,7 +267,23 @@ void SSBO::write(std::vector<WriteContext>& writes) {
 }
 
 Std430AlignmentType::Range SSBO::range_of(uint32_t id, SSBOAccess& acc) {
-    assert(id < _n_ubos);
+    assert(id < _n_ssbos);
+    Std430AlignmentType::Range range = find_range_recursive(_layout, acc, 0);
+    range.offset += _stride * id;
+    range.stride = (range.stride == 0 ? _stride : range.stride);
+    range.size = (range.size == 0 ? _layout._total_size : range.size);
+    return range;
+}
+
+SSBOLayout::SSBOLayout(const Std430AlignmentType& layout, uint32_t n_ssbo) {
+    _stride = round_up_to(layout._total_size, layout._max_base_alignment);
+    _n_ssbos = n_ssbo;
+    _builder.host_access(otcv::BufferBuilder::Access::Invisible).size(_stride * _n_ssbos);
+    _layout = layout;
+}
+
+Std430AlignmentType::Range SSBOLayout::range_of(uint32_t id, SSBOAccess& acc) {
+    assert(id < _n_ssbos);
     Std430AlignmentType::Range range = find_range_recursive(_layout, acc, 0);
     range.offset += _stride * id;
     range.stride = (range.stride == 0 ? _stride : range.stride);

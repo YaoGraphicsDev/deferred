@@ -12,8 +12,8 @@ public:
 
 	void generate_aabb(
 		otcv::Buffer* positions,
-		std::vector<uint32_t> vertex_offsets,
-		std::vector<uint32_t> vertex_counts,
+		const std::vector<uint32_t>& vertex_offsets,
+		const std::vector<uint32_t>& vertex_counts,
 		otcv::ResourceState position_source_state,
 		otcv::ResourceState position_target_state,
 		otcv::ResourceState aabb_buffer_target_state);

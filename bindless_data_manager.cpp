@@ -115,7 +115,7 @@ void BindlessDataManager::build_all_pipelines(const std::string& geometry_shader
 				.add_binding().add_attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(glm::vec4));
 			builder.vertex_state(vbb);
 		}
-		builder.depth_test().cull_back_face();
+		builder.depth_test();
 		builder
 			.add_dynamic_state(VK_DYNAMIC_STATE_VIEWPORT)
 			.add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
